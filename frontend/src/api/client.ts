@@ -1,0 +1,188 @@
+import axios, { AxiosError } from 'axios';
+import { message } from 'antd';
+import type {
+  AdapterMeta, AllSettings, AuditLog, CallLog, DashboardStats, Delivery, DeliveryView,
+  Envelope, Goods, Order, OrderAttempt, PageResult, Platform, StrategyMeta, Supply, User,
+} from './types';
+
+const TOKEN_KEY = 'kamihub_token';
+
+export const tokenStore = {
+  get: () => localStorage.getItem(TOKEN_KEY) || '',
+  set: (t: string) => localStorage.setItem(TOKEN_KEY, t),
+  clear: () => localStorage.removeItem(TOKEN_KEY),
+};
+
+/** 401 时通知外层跳登录页 */
+let onUnauthorized: (() => void) | null = null;
+export function setUnauthorizedHandler(fn: () => void) {
+  onUnauthorized = fn;
+}
+
+const http = axios.create({ baseURL: '/api', timeout: 120000 });
+
+http.interceptors.request.use((config) => {
+  const token = tokenStore.get();
+  if (token) config.headers.Authorization = `Bearer ${token}`;
+  return config;
+});
+
+http.interceptors.response.use(
+  (res) => res,
+  (error: AxiosError<Envelope<unknown>>) => {
+    const status = error.response?.status;
+    const payload = error.response?.data;
+    let msg = payload?.msg || error.message || '请求失败';
+
+    if (status === 401) {
+      tokenStore.clear();
+      onUnauthorized?.();
+      msg = payload?.msg || '登录已过期，请重新登录';
+    }
+    // 429 单独提示，避免用户以为是 bug
+    if (status === 429) msg = payload?.msg || '请求过于频繁，请稍后再试';
+
+    return Promise.reject(new Error(msg));
+  },
+);
+
+/**
+ * 把分页响应里的 list 兜底成数组。
+ *
+ * 后端查询无结果时，Go 的 nil 切片会被序列化成 null，
+ * 页面直接 list.map() / list.length 会抛 TypeError 并整页白屏。
+ * 后端已保证返回 []，这里再兜一层，避免以后新增接口时重蹈覆辙。
+ */
+function normalizeList<T>(data: T): T {
+  if (data && typeof data === 'object' && 'list' in data) {
+    const page = data as { list: unknown };
+    if (!Array.isArray(page.list)) {
+      return { ...(data as Record<string, unknown>), list: [] } as T;
+    }
+  }
+  return data;
+}
+
+/** 统一取 data，失败时抛错 */
+async function unwrap<T>(promise: Promise<{ data: Envelope<T> }>): Promise<T> {
+  const res = await promise;
+  if (res.data.code !== 1) throw new Error(res.data.msg || '请求失败');
+  return normalizeList(res.data.data);
+}
+
+/** 把后端错误弹成 message，供页面 catch 里复用 */
+export function toastError(err: unknown) {
+  const msg = err instanceof Error ? err.message : String(err);
+  message.error(msg);
+  return msg;
+}
+
+export interface ListQuery {
+  page?: number;
+  page_size?: number;
+  keyword?: string;
+  [key: string]: unknown;
+}
+
+export const api = {
+  // ---------- 认证 ----------
+  login: (username: string, password: string) =>
+    unwrap<{ token: string; user: User; expires_in_seconds: number }>(
+      http.post('/auth/login', { username, password }),
+    ),
+  me: () => unwrap<User>(http.get('/auth/me')),
+  logout: () => unwrap<{ message: string }>(http.post('/auth/logout')),
+  changePassword: (old_password: string, new_password: string) =>
+    unwrap<{ message: string }>(http.post('/auth/password', { old_password, new_password })),
+
+  // ---------- 令牌签发（管理员） ----------
+  tokenPolicy: () =>
+    unwrap<{ default_ttl_hours: number; min_ttl_hours: number; max_ttl_hours: number; revoke_hint: string }>(
+      http.get('/auth/token-policy'),
+    ),
+  issueToken: (body: { user_id?: number; ttl_hours?: number; remark?: string }) =>
+    unwrap<{ token: string; expires_at: string; ttl_hours: number; user: User }>(
+      http.post('/auth/tokens', body),
+    ),
+
+  // ---------- 概览 ----------
+  stats: () => unwrap<DashboardStats>(http.get('/dashboard/stats')),
+
+  // ---------- 元数据 ----------
+  adapters: () => unwrap<{ list: AdapterMeta[] }>(http.get('/adapters')),
+  strategies: () => unwrap<{ list: StrategyMeta[] }>(http.get('/strategies')),
+
+  // ---------- 平台 ----------
+  platforms: (q: ListQuery = {}) => unwrap<PageResult<Platform>>(http.get('/platforms', { params: q })),
+  platform: (id: number) => unwrap<Platform>(http.get(`/platforms/${id}`)),
+  createPlatform: (body: unknown) => unwrap<Platform>(http.post('/platforms', body)),
+  updatePlatform: (id: number, body: unknown) => unwrap<Platform>(http.put(`/platforms/${id}`, body)),
+  deletePlatform: (id: number) => unwrap<{ message: string }>(http.delete(`/platforms/${id}`)),
+  testPlatform: (id: number) =>
+    unwrap<{ balance: string | number; currency: string; extra?: Record<string, unknown> }>(
+      http.post(`/platforms/${id}/test`),
+    ),
+  platformGoods: (id: number, q: ListQuery = {}) =>
+    unwrap<PageResult<{ goods_no: string; name: string; unit_price: string | number; available_quantity: number; delivery_mode: number; source: string }>>(
+      http.get(`/platforms/${id}/goods`, { params: q }),
+    ),
+
+  // ---------- 商品 ----------
+  goodsList: (q: ListQuery = {}) => unwrap<PageResult<Goods>>(http.get('/goods', { params: q })),
+  goods: (id: number) => unwrap<Goods>(http.get(`/goods/${id}`)),
+  createGoods: (body: unknown) => unwrap<Goods>(http.post('/goods', body)),
+  updateGoods: (id: number, body: unknown) => unwrap<Goods>(http.put(`/goods/${id}`, body)),
+  deleteGoods: (id: number) => unwrap<{ message: string }>(http.delete(`/goods/${id}`)),
+  createSupply: (goodsId: number, body: unknown) => unwrap<Supply>(http.post(`/goods/${goodsId}/supplies`, body)),
+  updateSupply: (id: number, body: unknown) => unwrap<Supply>(http.put(`/supplies/${id}`, body)),
+  deleteSupply: (id: number) => unwrap<{ message: string }>(http.delete(`/supplies/${id}`)),
+  syncSupplyStock: (id: number) => unwrap<Supply>(http.post(`/supplies/${id}/sync-stock`)),
+  // 重新从上游抓取该货源的使用说明原文
+  fetchSupplyInstruction: (id: number) => unwrap<Supply>(http.post(`/supplies/${id}/fetch-instruction`)),
+
+  // ---------- 订单 ----------
+  orders: (q: ListQuery = {}) => unwrap<PageResult<Order>>(http.get('/orders', { params: q })),
+  order: (id: number) =>
+    unwrap<{ order: Order; cards: string[]; delivery_url: string }>(http.get(`/orders/${id}`)),
+  orderAttempts: (id: number) => unwrap<{ list: OrderAttempt[] }>(http.get(`/orders/${id}/attempts`)),
+  retryOrder: (id: number) =>
+    unwrap<{ order: Order; delivery_url: string; cards: string[] }>(http.post(`/orders/${id}/retry`)),
+  purchase: (body: { request_id: string; goods_code: string; quantity?: number; remark?: string; ttl_hours?: number }) =>
+    unwrap<{ order: Order; cards: string[]; delivery_url: string; delivery_token: string }>(
+      http.post('/orders/purchase', body),
+    ),
+
+  // ---------- 提货链接 ----------
+  deliveries: (q: ListQuery = {}) => unwrap<PageResult<Delivery>>(http.get('/deliveries', { params: q })),
+  delivery: (id: number) =>
+    unwrap<{ delivery: Delivery; url: string; expired: boolean; order: Order; cards: string[]; has_password: boolean }>(
+      http.get(`/deliveries/${id}`),
+    ),
+  revokeDelivery: (id: number, reason: string) =>
+    unwrap<{ message: string }>(http.post(`/deliveries/${id}/revoke`, { reason })),
+  extendDelivery: (id: number, hours: number) =>
+    unwrap<{ delivery: Delivery; url: string }>(http.post(`/deliveries/${id}/extend`, { hours })),
+  setDeliveryPassword: (id: number, password: string) =>
+    unwrap<{ message: string }>(http.post(`/deliveries/${id}/password`, { password })),
+  deliveryViews: (id: number, q: ListQuery = {}) =>
+    unwrap<PageResult<DeliveryView>>(http.get(`/deliveries/${id}/views`, { params: q })),
+
+  // ---------- 设置 ----------
+  settings: () => unwrap<{ settings: Record<string, unknown> } & AllSettings>(http.get('/settings')),
+  updateSetting: (key: string, value: unknown) =>
+    unwrap<{ message: string }>(http.put(`/settings/${key}`, value)),
+
+  // ---------- 日志 ----------
+  callLogs: (q: ListQuery = {}) => unwrap<PageResult<CallLog>>(http.get('/call-logs', { params: q })),
+  auditLogs: (q: ListQuery = {}) => unwrap<PageResult<AuditLog>>(http.get('/audit-logs', { params: q })),
+
+  // ---------- 用户 ----------
+  users: (q: ListQuery = {}) => unwrap<PageResult<User>>(http.get('/users', { params: q })),
+  createUser: (body: unknown) => unwrap<User>(http.post('/users', body)),
+  updateUser: (id: number, body: unknown) => unwrap<User>(http.put(`/users/${id}`, body)),
+  deleteUser: (id: number) => unwrap<{ message: string }>(http.delete(`/users/${id}`)),
+  resetPassword: (id: number, new_password: string) =>
+    unwrap<{ message: string }>(http.post(`/users/${id}/reset-password`, { new_password })),
+};
+
+export default http;

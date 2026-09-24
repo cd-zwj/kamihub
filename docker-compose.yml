@@ -1,0 +1,124 @@
+# kamihub 部署编排
+#
+# 启动：
+#   cp .env.example .env && vi .env
+#   docker compose up -d --build
+#
+# 服务构成：
+#   kamihub    Go 后端 + 提货页（服务端渲染）
+#   postgres   业务数据
+#   redis      分布式锁 / 限流 / 幂等快路径
+#   web        前端静态资源（Nginx 托管）
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: kamihub-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:-kamihub}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD 必须设置}
+      POSTGRES_DB: ${DB_NAME:-kamihub}
+      TZ: Asia/Shanghai
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-kamihub} -d ${DB_NAME:-kamihub}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    # 不暴露到宿主机：只有本编排网络内的服务能访问
+    networks: [kamihub]
+
+  redis:
+    image: redis:7-alpine
+    container_name: kamihub-redis
+    restart: unless-stopped
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    networks: [kamihub]
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: kamihub-backend:1.0.0
+    container_name: kamihub-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      APP_ENV: production
+      APP_HOST: 0.0.0.0
+      APP_PORT: "8080"
+      # 提货链接的前缀，必须是买家能访问到的公网地址
+      APP_BASE_URL: ${APP_BASE_URL:?APP_BASE_URL 必须设置，例如 https://api.example.com}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      TRUST_PROXY: "true"
+
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: ${DB_USER:-kamihub}
+      DB_PASSWORD: ${DB_PASSWORD:?}
+      DB_NAME: ${DB_NAME:-kamihub}
+      DB_SSLMODE: disable
+      DB_AUTO_MIGRATE: "true"
+
+      REDIS_ADDR: redis:6379
+      REDIS_DB: "0"
+
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET 必须设置（openssl rand -hex 32）}
+      JWT_TTL: ${JWT_TTL:-12h}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?ENCRYPTION_KEY 必须设置（openssl rand -hex 32）}
+
+      DEFAULT_ADMIN_USERNAME: ${DEFAULT_ADMIN_USERNAME:-admin}
+      DEFAULT_ADMIN_PASSWORD: ${DEFAULT_ADMIN_PASSWORD:-}
+
+      DELIVERY_DEFAULT_TTL: ${DELIVERY_DEFAULT_TTL:-168h}
+      DELIVERY_TOKEN_BYTES: ${DELIVERY_TOKEN_BYTES:-32}
+      UPSTREAM_POLL_TIMEOUT: ${UPSTREAM_POLL_TIMEOUT:-30s}
+      UPSTREAM_POLL_INTERVAL: ${UPSTREAM_POLL_INTERVAL:-2s}
+      # 建/改货源时向上游校验商品并预填库存；上游接口不稳定时可设 false
+      UPSTREAM_VERIFY_SUPPLY: ${UPSTREAM_VERIFY_SUPPLY:-true}
+    ports:
+      # 只绑定回环：外部必须经 Nginx 反代，不要直接暴露
+      - "127.0.0.1:8080:8080"
+    networks: [kamihub]
+
+  web:
+    build:
+      # 上下文用仓库根目录，便于把 deploy/nginx-web.conf 一起打进镜像
+      context: .
+      dockerfile: frontend/Dockerfile
+    image: kamihub-web:1.0.0
+    container_name: kamihub-web
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      # 这是给买家和后台用的统一入口，生产环境应改由外层 Nginx 反代并加 HTTPS
+      - "127.0.0.1:8090:80"
+    networks: [kamihub]
+
+volumes:
+  pg-data:
+    driver: local
+  redis-data:
+    driver: local
+
+networks:
+  kamihub:
+    driver: bridge

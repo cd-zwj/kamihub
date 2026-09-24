@@ -1,0 +1,44 @@
+# ---------- 密钥 / 环境变量 ----------
+# 真实密钥绝不入库
+.env
+.env.local
+backend/.env
+backend/.env.local
+
+# ---------- 构建产物 ----------
+backend/kamihub
+backend/kamihub.exe
+backend/server
+backend/server.exe
+*.exe
+*.exe~
+*.test
+*.out
+
+# ---------- 前端 ----------
+frontend/node_modules/
+frontend/dist/
+frontend/tsconfig.tsbuildinfo
+node_modules/
+
+# ---------- 运行期数据 ----------
+data/
+*.log
+logs/
+
+# ---------- 数据库备份 ----------
+*.sql
+!docs/**/*.sql
+
+# ---------- 内部资料（不随开源发布）----------
+*.bak
+*.deprecated-*
+backup-*
+
+# ---------- 开源准备过程中的临时文件 ----------
+OPENSOURCE-CHECKLIST.md
+README.github.md
+README.internal.md
+*.old
+# ---------- 本地调试脚本 ----------
+_debug/

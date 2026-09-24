@@ -1,0 +1,197 @@
+:root {
+  --brand: #346ddb;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Helvetica Neue', 'Microsoft YaHei', sans-serif;
+  background: #f4f6fb;
+}
+
+/* 登录页 */
+.login-wrap {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background:
+    radial-gradient(1100px 620px at 12% -10%, rgba(99, 155, 255, 0.35), transparent 58%),
+    radial-gradient(900px 560px at 88% 0%, rgba(72, 118, 230, 0.25), transparent 52%),
+    linear-gradient(165deg, #eef4ff 0%, #f5f7fc 45%, #eef2f8 100%);
+}
+
+.login-card {
+  width: 100%;
+  max-width: 380px;
+  background: #fff;
+  border-radius: 16px;
+  padding: 32px 28px 24px;
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04), 0 18px 48px rgba(16, 24, 40, 0.1);
+}
+
+.login-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.login-logo {
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  background: var(--brand);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 18px;
+}
+
+.login-title {
+  font-size: 19px;
+  font-weight: 700;
+  color: #1a1f36;
+}
+
+.login-sub {
+  color: #6b7385;
+  font-size: 13px;
+  margin: 0 0 22px;
+}
+
+/* 布局 */
+.app-logo {
+  height: 56px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 18px;
+  color: #fff;
+  font-weight: 700;
+  font-size: 16px;
+  letter-spacing: 0.3px;
+}
+
+.app-logo-mark {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: var(--brand);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
+  flex: none;
+}
+
+.page-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.page-title {
+  font-size: 20px;
+  font-weight: 700;
+  color: #1a1f36;
+  margin: 0;
+}
+
+.page-desc {
+  color: #6b7385;
+  font-size: 13px;
+  margin: 4px 0 0;
+}
+
+/* 统计卡片 */
+.stat-card {
+  background: #fff;
+  border-radius: 12px;
+  padding: 18px;
+  height: 100%;
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04), 0 4px 14px rgba(16, 24, 40, 0.05);
+}
+
+.stat-label {
+  color: #6b7385;
+  font-size: 13px;
+  margin-bottom: 6px;
+}
+
+.stat-value {
+  font-size: 26px;
+  font-weight: 700;
+  color: #1a1f36;
+  line-height: 1.2;
+}
+
+.stat-extra {
+  color: #98a0b0;
+  font-size: 12px;
+  margin-top: 6px;
+}
+
+/* 卡密展示 */
+.code-block {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  background: #f6f8fd;
+  border: 1px solid #e8ecf3;
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  word-break: break-all;
+  font-size: 14px;
+}
+
+.code-block:last-child {
+  margin-bottom: 0;
+}
+
+.pre-wrap {
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: #fafbfe;
+  border: 1px solid #e8ecf3;
+  border-radius: 8px;
+  padding: 12px;
+  font-size: 13px;
+  line-height: 1.7;
+  margin: 0;
+}
+
+.hint-box {
+  background: #eef3ff;
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 13px;
+  color: #2b3a5c;
+  line-height: 1.7;
+}
+
+.table-toolbar {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-bottom: 14px;
+}
