@@ -26,6 +26,7 @@ type Config struct {
 
 type App struct {
 	Env         string // development / production
+	Host        string // 监听地址，如 127.0.0.1 或 0.0.0.0
 	Port        int
 	BaseURL     string // 对外访问地址，用于拼提货链接，如 https://api.example.com
 	LogLevel    string
@@ -104,12 +105,16 @@ func Load() (*Config, error) {
 
 	cfg := &Config{
 		App: App{
-			Env:                  env("APP_ENV", "production"),
-			Port:                 envInt("APP_PORT", 8080),
-			BaseURL:              strings.TrimRight(env("APP_BASE_URL", "http://localhost:8080"), "/"),
-			LogLevel:             env("LOG_LEVEL", "info"),
-			AutoMigrate:          envBool("DB_AUTO_MIGRATE", true),
-			TrustProxy:           envBool("TRUST_PROXY", true),
+			Env:         env("APP_ENV", "production"),
+			Host:        env("APP_HOST", "127.0.0.1"),
+			Port:        envInt("APP_PORT", 8080),
+			BaseURL:     strings.TrimRight(env("APP_BASE_URL", "http://localhost:8080"), "/"),
+			LogLevel:    env("LOG_LEVEL", "info"),
+			AutoMigrate: envBool("DB_AUTO_MIGRATE", false),
+			// TrustProxy 默认关闭：默认监听 127.0.0.1，前面通常没有反代，
+			// 信任 X-Forwarded-For 等于允许客户端伪造来源 IP。
+			// 确实放在 Nginx / 云负载均衡后面时再显式打开。
+			TrustProxy:           envBool("TRUST_PROXY", false),
 			DefaultAdminUsername: env("DEFAULT_ADMIN_USERNAME", "admin"),
 			DefaultAdminPassword: env("DEFAULT_ADMIN_PASSWORD", ""),
 		},

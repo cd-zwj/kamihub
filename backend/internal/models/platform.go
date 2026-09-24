@@ -22,10 +22,10 @@ type Platform struct {
 	// Extra 适配器特有配置（如某些平台的额外参数）
 	Extra datatypes.JSON `gorm:"type:jsonb" json:"extra"`
 
-	TimeoutMS       int `gorm:"not null;default:15000" json:"timeout_ms"`
-	MaxRetries      int `gorm:"not null;default:2" json:"max_retries"`
-	RateLimitPerMin int `gorm:"not null;default:120" json:"rate_limit_per_min"`
-	SortOrder       int `gorm:"not null;default:0" json:"sort_order"`
+	TimeoutMS       int    `gorm:"not null;default:15000" json:"timeout_ms"`
+	MaxRetries      int    `gorm:"not null;default:2" json:"max_retries"`
+	RateLimitPerMin int    `gorm:"not null;default:120" json:"rate_limit_per_min"`
+	SortOrder       int    `gorm:"not null;default:0" json:"sort_order"`
 	Remark          string `gorm:"size:255" json:"remark"`
 
 	// 连通性自检结果

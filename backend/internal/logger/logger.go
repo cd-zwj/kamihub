@@ -9,21 +9,21 @@ import (
 
 // 这些 key 的值一律打码，避免 secret / 卡密 落到日志里
 var sensitiveKeys = map[string]struct{}{
-	"secret":        {},
-	"app_secret":    {},
-	"appsecret":     {},
-	"sign":          {},
-	"password":      {},
-	"password_hash": {},
-	"token":         {},
-	"jwt":           {},
-	"authorization": {},
-	"credentials":   {},
+	"secret":         {},
+	"app_secret":     {},
+	"appsecret":      {},
+	"sign":           {},
+	"password":       {},
+	"password_hash":  {},
+	"token":          {},
+	"jwt":            {},
+	"authorization":  {},
+	"credentials":    {},
 	"encryption_key": {},
-	"cards":         {},
-	"card_codes":    {},
-	"content":       {},
-	"delivery_text": {},
+	"cards":          {},
+	"card_codes":     {},
+	"content":        {},
+	"delivery_text":  {},
 }
 
 // Setup 初始化全局 logger。

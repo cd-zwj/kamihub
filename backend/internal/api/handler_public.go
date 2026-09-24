@@ -56,10 +56,10 @@ func (h *Handlers) deliveryPage(c *gin.Context) {
 	// 需要密码且尚未解锁
 	if d.PasswordHash != "" && !h.isUnlocked(c, token) {
 		h.renderPage(c, render.PageData{
-			SiteName:   h.settings.Brand(ctx).SiteName,
-			LogoURL:    h.settings.Brand(ctx).LogoURL,
-			NeedUnlock: true,
-			OrderNo:    order.OrderNo,
+			SiteName:    h.settings.Brand(ctx).SiteName,
+			LogoURL:     h.settings.Brand(ctx).LogoURL,
+			NeedUnlock:  true,
+			OrderNo:     order.OrderNo,
 			ShowOrderNo: true,
 		})
 		return
@@ -141,12 +141,12 @@ func (h *Handlers) renderDeliveryOK(c *gin.Context, d *models.Delivery, order *m
 		ShowNotice:      page.ShowNotice,
 		AllowCopy:       page.AllowCopy,
 
-		OrderNo: order.OrderNo,
-		TradeNo: order.PlatformTradeNo,
+		OrderNo:  order.OrderNo,
+		TradeNo:  order.PlatformTradeNo,
 		Quantity: order.Quantity,
 
-		Cards:     cardList(*order),
-		Content:   order.Content,
+		Cards:   cardList(*order),
+		Content: order.Content,
 		// 使用说明会原样展示给买家，上游供货商往往在里面写了自己的联系方式。
 		// 这里在「渲染时」过滤，不改数据库里的 order.Instruction ——
 		// 存档保留原文便于追溯对账，买家看到的是净化后的版本。

@@ -52,6 +52,9 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      args:
+        # Go 模块代理。国内网络构建时在 .env 里设 GOPROXY=https://goproxy.cn,direct
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
     image: kamihub-backend:1.0.0
     container_name: kamihub-backend
     restart: unless-stopped

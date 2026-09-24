@@ -1,7 +1,8 @@
 // Command server 是 kamihub 的进程入口。
 //
 // 启动顺序：加载配置 → 初始化日志 → 连数据库/Redis → 迁移 → 初始化数据
-//          → 注册平台适配器 → 组装服务 → 挂载路由 → 监听
+//
+//	→ 注册平台适配器 → 组装服务 → 挂载路由 → 监听
 package main
 
 import (
@@ -165,11 +166,7 @@ func run() error {
 }
 
 func listenAddr(cfg *config.Config) string {
-	host := os.Getenv("APP_HOST")
-	if host == "" {
-		host = "0.0.0.0"
-	}
-	return host + ":" + itoa(cfg.App.Port)
+	return cfg.App.Host + ":" + itoa(cfg.App.Port)
 }
 
 func itoa(v int) string {

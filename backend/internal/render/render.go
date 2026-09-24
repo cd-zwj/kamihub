@@ -52,17 +52,17 @@ type PageData struct {
 	DeliverTime     string
 
 	// 发货内容
-	Cards     []string
-	Content   string
-	Instruction string
+	Cards           []string
+	Content         string
+	Instruction     string
 	ShowInstruction bool
-	AllowCopy bool
+	AllowCopy       bool
 
 	// 附加内容
-	Extra           string
-	ExtraPosition   string
-	ExtraFirst      bool
-	ExtraLast       bool
+	Extra         string
+	ExtraPosition string
+	ExtraFirst    bool
+	ExtraLast     bool
 
 	// 联系方式
 	ShowContact bool
@@ -81,7 +81,9 @@ type Renderer struct {
 func New() (*Renderer, error) {
 	t, err := template.New("delivery.html").Funcs(template.FuncMap{
 		"contactIcon": contactIcon,
-		"nl2br":       func(s string) template.HTML { return template.HTML(strings.ReplaceAll(template.HTMLEscapeString(s), "\n", "<br>")) },
+		"nl2br": func(s string) template.HTML {
+			return template.HTML(strings.ReplaceAll(template.HTMLEscapeString(s), "\n", "<br>"))
+		},
 		// richhtml 用于上游返回的富文本（使用说明、发货内容）。
 		// 模板里必须显式写 {{ richhtml .Xxx }} 才会走净化，
 		// 写成 {{ .Xxx }} 会退回自动转义（安全但会显示标签源码）。

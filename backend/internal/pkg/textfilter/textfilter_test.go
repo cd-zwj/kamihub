@@ -97,7 +97,7 @@ func TestApply_无规则不改动(t *testing.T) {
 // 坏正则不能把整页搞崩，只跳过这一条。
 func TestApply_非法正则被跳过(t *testing.T) {
 	rules := []Rule{
-		{Pattern: "([", Mode: ModeRegex, Enabled: true},                         // 非法正则
+		{Pattern: "([", Mode: ModeRegex, Enabled: true},                            // 非法正则
 		{Pattern: "kf_8888", Replacement: "已处理", Mode: ModeReplace, Enabled: true}, // 合法规则仍应生效
 	}
 	got := Apply(realInstruction, rules)

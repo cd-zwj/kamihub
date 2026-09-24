@@ -87,8 +87,8 @@ type GoodsInput struct {
 	MaxAttempts     *int            `json:"max_attempts"`
 	MaxQuantity     *int            `json:"max_quantity"`
 	// MaxSupplyPrice 最高供应价（每笔应付总额上限，含手续费）。0 或负数表示不限制。
-	MaxSupplyPrice  *decimal.Decimal `json:"max_supply_price"`
-	ExtraTemplate   string          `json:"extra_template"`
+	MaxSupplyPrice *decimal.Decimal `json:"max_supply_price"`
+	ExtraTemplate  string           `json:"extra_template"`
 }
 
 func (in *GoodsInput) validate() error {

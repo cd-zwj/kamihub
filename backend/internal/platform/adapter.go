@@ -9,14 +9,14 @@ import (
 
 // ClientConfig 构造一个平台客户端所需的全部信息。
 type ClientConfig struct {
-	PlatformID  uint
+	PlatformID   uint
 	PlatformName string
-	BaseURL     string
-	Credentials Credentials
-	Extra       map[string]any
-	TimeoutMS   int
-	MaxRetries  int
-	Logger      *slog.Logger
+	BaseURL      string
+	Credentials  Credentials
+	Extra        map[string]any
+	TimeoutMS    int
+	MaxRetries   int
+	Logger       *slog.Logger
 	// OnCall 每次调用上游后回调，用于写调用日志
 	OnCall func(CallRecord)
 }

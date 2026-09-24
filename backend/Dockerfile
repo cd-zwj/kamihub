@@ -7,7 +7,11 @@ WORKDIR /src
 
 # 先拷贝依赖清单，利用层缓存
 COPY go.mod go.sum ./
-RUN go env -w GOPROXY=https://goproxy.cn,direct && \
+
+# 模块代理。默认走官方源，保证海外构建与 GitHub Actions 正常；
+# 国内网络构建时用 --build-arg GOPROXY=https://goproxy.cn,direct 覆盖。
+ARG GOPROXY=https://proxy.golang.org,direct
+RUN go env -w GOPROXY=$GOPROXY && \
     go mod download
 
 COPY . .

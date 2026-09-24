@@ -143,9 +143,9 @@ func (h *Handlers) dashboardStats(c *gin.Context) {
 			"by_status":       statusMap,
 		},
 		"amount": gin.H{
-			"today":            usedToday,
-			"daily_limit":      security.MaxDailyAmount,
-			"daily_remaining":  remaining,
+			"today":           usedToday,
+			"daily_limit":     security.MaxDailyAmount,
+			"daily_remaining": remaining,
 		},
 		"platforms": gin.H{
 			"total":   platformTotal,

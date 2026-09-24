@@ -29,9 +29,9 @@ type Delivery struct {
 	// 可选最大访问次数，0 表示不限
 	MaxViews int `gorm:"not null;default:0" json:"max_views"`
 
-	RevokedAt   *time.Time `json:"revoked_at"`
-	RevokedBy   *uint      `json:"revoked_by"`
-	RevokeReason string    `gorm:"size:255" json:"revoke_reason"`
+	RevokedAt    *time.Time `json:"revoked_at"`
+	RevokedBy    *uint      `json:"revoked_by"`
+	RevokeReason string     `gorm:"size:255" json:"revoke_reason"`
 
 	// 生成该链接时使用的页面配置快照，保证后续改全局配置不影响历史链接
 	PageSnapshot string `gorm:"type:text" json:"-"`

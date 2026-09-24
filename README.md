@@ -160,6 +160,10 @@ curl http://127.0.0.1:8090/health
 # {"code":1,"msg":"ok","data":{"database":true,"env":"production","redis":true}}
 ```
 
+> 编排默认把 backend 绑到 `127.0.0.1:8080`、web 绑到 `127.0.0.1:8090`。
+> 下面统一用 **8090**——它同时提供后台页面、`/api`、`/d` 提货页和 `/health`，
+> 是**唯一需要暴露给买家**的端口。
+
 ### 3. 登录后台
 
 浏览器打开 `http://127.0.0.1:8090`。
@@ -173,11 +177,15 @@ docker compose logs backend | grep -i password
 
 ### 4. 跑一遍冒烟测试
 
-仓库自带端到端脚本（会创建一条真实采购单，请确认已在后台配好平台与货源）：
+仓库自带端到端脚本（会创建一条**真实采购单**，请确认已在后台配好平台与货源）：
 
 ```bash
-node scripts/e2e.mjs
+ADMIN_USER=admin ADMIN_PASS='你的管理员密码' node scripts/e2e.mjs
 ```
+
+> 所有 e2e 脚本都从环境变量读登录信息，**不要把口令写进命令历史**时可以先
+> `export ADMIN_PASS=...`。脚本默认连 `127.0.0.1:8090`（即上面的 web 入口）；
+> 若后端单独跑在别的端口，用 `BASE=http://127.0.0.1:其他端口 node scripts/e2e.mjs` 覆盖。
 
 ---
 

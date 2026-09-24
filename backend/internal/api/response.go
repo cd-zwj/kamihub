@@ -61,12 +61,14 @@ func Fail(c *gin.Context, status int, code, msg string) {
 	c.AbortWithStatusJSON(status, Envelope{Code: 0, Msg: msg, Time: now(), Data: nil, Error: code})
 }
 
-func BadRequest(c *gin.Context, msg string)  { Fail(c, http.StatusBadRequest, "BAD_REQUEST", msg) }
+func BadRequest(c *gin.Context, msg string)   { Fail(c, http.StatusBadRequest, "BAD_REQUEST", msg) }
 func Unauthorized(c *gin.Context, msg string) { Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", msg) }
-func Forbidden(c *gin.Context, msg string)   { Fail(c, http.StatusForbidden, "FORBIDDEN", msg) }
-func NotFound(c *gin.Context, msg string)    { Fail(c, http.StatusNotFound, "NOT_FOUND", msg) }
-func Conflict(c *gin.Context, msg string)    { Fail(c, http.StatusConflict, "CONFLICT", msg) }
-func ServerError(c *gin.Context, msg string) { Fail(c, http.StatusInternalServerError, "INTERNAL_ERROR", msg) }
+func Forbidden(c *gin.Context, msg string)    { Fail(c, http.StatusForbidden, "FORBIDDEN", msg) }
+func NotFound(c *gin.Context, msg string)     { Fail(c, http.StatusNotFound, "NOT_FOUND", msg) }
+func Conflict(c *gin.Context, msg string)     { Fail(c, http.StatusConflict, "CONFLICT", msg) }
+func ServerError(c *gin.Context, msg string) {
+	Fail(c, http.StatusInternalServerError, "INTERNAL_ERROR", msg)
+}
 
 // Abort 把业务错误映射成合适的 HTTP 状态码。
 func Abort(c *gin.Context, err error) {

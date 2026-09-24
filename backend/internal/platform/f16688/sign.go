@@ -78,7 +78,7 @@ func encodeJSON(v any) (string, error) {
 	return strings.TrimRight(buf.String(), "\n"), nil
 }
 
-// isEmptyValue 对齐 PHP 的 `$v === '' || $v === null`。
+// isEmptyValue 对齐 PHP 的 `$v === ” || $v === null`。
 // 注意 0 / 0.0 / false 都不算空，必须参与签名。
 func isEmptyValue(v any) bool {
 	if v == nil {

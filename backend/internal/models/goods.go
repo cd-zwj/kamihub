@@ -15,9 +15,9 @@ const (
 
 // 发货方式（与上游语义对齐）
 const (
-	DeliveryModeCard   = 1 // 卡密
+	DeliveryModeCard    = 1 // 卡密
 	DeliveryModeContent = 2 // 内容
-	DeliveryModeManual = 3 // 人工发货
+	DeliveryModeManual  = 3 // 人工发货
 )
 
 // 路由策略标识
@@ -83,8 +83,8 @@ func (Goods) TableName() string { return "goods" }
 // 否则路由引擎会把它们当成两个候选，白白消耗 max_attempts 的故障转移次数。
 // CreateSupply 里的 isDuplicateKey 分支依赖这个索引，缺了它那段错误处理就是死代码。
 type Supply struct {
-	ID       uint `gorm:"primaryKey" json:"id"`
-	GoodsID  uint `gorm:"not null;index;uniqueIndex:idx_supplies_identity" json:"goods_id"`
+	ID         uint `gorm:"primaryKey" json:"id"`
+	GoodsID    uint `gorm:"not null;index;uniqueIndex:idx_supplies_identity" json:"goods_id"`
 	PlatformID uint `gorm:"not null;index;uniqueIndex:idx_supplies_identity" json:"platform_id"`
 
 	// PlatformGoodsNo 上游平台的商品编号
@@ -92,8 +92,8 @@ type Supply struct {
 	// 采购成本价（缓存，实际以询价为准）
 	CostPrice decimal.Decimal `gorm:"type:numeric(12,2);default:0" json:"cost_price"`
 
-	Priority int `gorm:"not null;default:100" json:"priority"`
-	Weight   int `gorm:"not null;default:100" json:"weight"`
+	Priority int  `gorm:"not null;default:100" json:"priority"`
+	Weight   int  `gorm:"not null;default:100" json:"weight"`
 	Enabled  bool `gorm:"not null;default:true" json:"enabled"`
 
 	// 库存缓存

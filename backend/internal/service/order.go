@@ -133,12 +133,12 @@ func (s *OrderService) Create(ctx context.Context, in CreateOrderInput) (*models
 	ranked := strategy.Rank(routing.FilterQuantity(candidates, quantity))
 
 	order := &models.Order{
-		OrderNo:     generateOrderNo(),
-		RequestID:   in.RequestID,
-		GoodsID:     goods.ID,
-		Quantity:    quantity,
-		Status:      models.OrderStatusPurchasing,
-		Remark:      truncateStr(in.Remark, 500),
+		OrderNo:         generateOrderNo(),
+		RequestID:       in.RequestID,
+		GoodsID:         goods.ID,
+		Quantity:        quantity,
+		Status:          models.OrderStatusPurchasing,
+		Remark:          truncateStr(in.Remark, 500),
 		CreatedByUserID: in.UserID,
 	}
 	if snap, err := json.Marshal(goods); err == nil {

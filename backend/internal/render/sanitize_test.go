@@ -28,21 +28,21 @@ func TestSanitizeHTML_保留正常排版(t *testing.T) {
 
 func TestSanitizeHTML_去掉脚本(t *testing.T) {
 	cases := map[string]string{
-		"script 标签":       `<p>正常</p><script>alert(1)</script>`,
-		"script 带属性":      `<script src="https://evil.com/x.js"></script><p>正常</p>`,
-		"事件属性":            `<p onclick="alert(1)">文字</p>`,
-		"图片 onerror":       `<img src="https://a.com/x.png" onerror="alert(1)">`,
-		"大写事件属性":          `<p ONCLICK="alert(1)">文字</p>`,
-		"javascript: 链接":   `<a href="javascript:alert(1)">点我</a>`,
-		"javascript 带制表符绕过": `<a href="java&#9;script:alert(1)">点我</a>`,
-		"iframe":           `<iframe src="https://evil.com"></iframe>`,
-		"style 标签":         `<style>body{display:none}</style><p>正常</p>`,
-		"表单钓鱼":            `<form action="https://evil.com"><input name="p"><button>提交</button></form>`,
-		"svg 内联脚本":         `<svg><script>alert(1)</script></svg>`,
-		"注释藏脚本":           `<!--<script>alert(1)</script>--><p>正常</p>`,
-		"style 里的 url":     `<span style="background:url(https://evil.com/x)">文字</span>`,
+		"script 标签":           `<p>正常</p><script>alert(1)</script>`,
+		"script 带属性":          `<script src="https://evil.com/x.js"></script><p>正常</p>`,
+		"事件属性":                `<p onclick="alert(1)">文字</p>`,
+		"图片 onerror":          `<img src="https://a.com/x.png" onerror="alert(1)">`,
+		"大写事件属性":              `<p ONCLICK="alert(1)">文字</p>`,
+		"javascript: 链接":      `<a href="javascript:alert(1)">点我</a>`,
+		"javascript 带制表符绕过":   `<a href="java&#9;script:alert(1)">点我</a>`,
+		"iframe":              `<iframe src="https://evil.com"></iframe>`,
+		"style 标签":            `<style>body{display:none}</style><p>正常</p>`,
+		"表单钓鱼":                `<form action="https://evil.com"><input name="p"><button>提交</button></form>`,
+		"svg 内联脚本":            `<svg><script>alert(1)</script></svg>`,
+		"注释藏脚本":               `<!--<script>alert(1)</script>--><p>正常</p>`,
+		"style 里的 url":        `<span style="background:url(https://evil.com/x)">文字</span>`,
 		"style 里的 expression": `<span style="color:expression(alert(1))">文字</span>`,
-		"data:text/html 链接": `<a href="data:text/html,<script>alert(1)</script>">点我</a>`,
+		"data:text/html 链接":   `<a href="data:text/html,<script>alert(1)</script>">点我</a>`,
 	}
 
 	for name, in := range cases {

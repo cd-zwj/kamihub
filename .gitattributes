@@ -1,0 +1,30 @@
+# 统一换行符：仓库内一律存 LF，检出时按平台转换。
+# 避免 Windows 上编辑过的 Go 源码被提交成 CRLF，导致 diff 噪音与 CI 报错。
+* text=auto eol=lf
+
+# 明确二进制文件，禁止任何换行符转换
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.webp binary
+*.woff binary
+*.woff2 binary
+*.ttf  binary
+*.pdf  binary
+*.zip  binary
+*.gz   binary
+
+# Windows 专用脚本保留 CRLF，否则 cmd.exe 可能无法正确解析
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+
+# 用于 GitHub 语言统计：把前端标记为 TS/TSX，而不是把整个仓库算成 Go
+*.ts   linguist-language=TypeScript
+*.tsx  linguist-language=TypeScript
+
+# 文档与锁文件默认折叠进 diff
+README.md       linguist-documentation
+docs/*          linguist-documentation
+frontend/package-lock.json  linguist-generated

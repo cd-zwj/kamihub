@@ -87,17 +87,17 @@ func (Order) TableName() string { return "orders" }
 
 // OrderAttempt 记录每一次货源尝试，用于排查故障转移过程。
 type OrderAttempt struct {
-	ID         uint   `gorm:"primaryKey" json:"id"`
-	OrderID    uint   `gorm:"not null;index" json:"order_id"`
-	SupplyID   uint   `gorm:"not null" json:"supply_id"`
-	PlatformID uint   `gorm:"not null" json:"platform_id"`
-	PlatformName string `gorm:"size:128" json:"platform_name"`
-	Strategy   string `gorm:"size:32" json:"strategy"`
-	Success    bool   `gorm:"not null" json:"success"`
-	FailKind   string `gorm:"size:32" json:"fail_kind"`
-	ErrorMsg   string `gorm:"type:text" json:"error_msg"`
-	ElapsedMS  int    `json:"elapsed_ms"`
-	CreatedAt  time.Time `json:"created_at"`
+	ID           uint      `gorm:"primaryKey" json:"id"`
+	OrderID      uint      `gorm:"not null;index" json:"order_id"`
+	SupplyID     uint      `gorm:"not null" json:"supply_id"`
+	PlatformID   uint      `gorm:"not null" json:"platform_id"`
+	PlatformName string    `gorm:"size:128" json:"platform_name"`
+	Strategy     string    `gorm:"size:32" json:"strategy"`
+	Success      bool      `gorm:"not null" json:"success"`
+	FailKind     string    `gorm:"size:32" json:"fail_kind"`
+	ErrorMsg     string    `gorm:"type:text" json:"error_msg"`
+	ElapsedMS    int       `json:"elapsed_ms"`
+	CreatedAt    time.Time `json:"created_at"`
 }
 
 func (OrderAttempt) TableName() string { return "order_attempts" }

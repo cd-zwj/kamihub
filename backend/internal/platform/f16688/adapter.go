@@ -15,10 +15,10 @@ import (
 )
 
 const (
-	Code            = "f16688"
-	DefaultBaseURL  = "https://www.16688.com.cn/openApi"
-	credAppID       = "app_id"
-	credAppSecret   = "app_secret"
+	Code           = "f16688"
+	DefaultBaseURL = "https://www.16688.com.cn/openApi"
+	credAppID      = "app_id"
+	credAppSecret  = "app_secret"
 )
 
 // Adapter 16688 适配器
@@ -26,8 +26,8 @@ type Adapter struct{}
 
 func New() *Adapter { return &Adapter{} }
 
-func (a *Adapter) Code() string        { return Code }
-func (a *Adapter) Name() string        { return "16688 开放平台" }
+func (a *Adapter) Code() string           { return Code }
+func (a *Adapter) Name() string           { return "16688 开放平台" }
 func (a *Adapter) DefaultBaseURL() string { return DefaultBaseURL }
 
 func (a *Adapter) Description() string {
