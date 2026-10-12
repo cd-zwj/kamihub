@@ -16,7 +16,7 @@ export default function Login() {
     try {
       await login(values.username.trim(), values.password);
       message.success('登录成功');
-      navigate('/', { replace: true });
+      navigate('/admin', { replace: true });
     } catch (err) {
       setError(err instanceof Error ? err.message : '登录失败');
     } finally {
@@ -32,6 +32,18 @@ export default function Login() {
           <span className="login-title">kamihub</span>
         </div>
         <p className="login-sub">多平台卡密采购与统一发货 · 管理后台</p>
+
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 16, fontSize: 13 }}
+          message="这里是员工后台"
+          description={
+            <>
+              买家请前往 <a href="/">商城首页</a>
+            </>
+          }
+        />
 
         {error && (
           <Alert type="error" message={error} showIcon style={{ marginBottom: 16 }} closable onClose={() => setError('')} />
@@ -50,6 +62,16 @@ export default function Login() {
             </Button>
           </Form.Item>
         </Form>
+
+        {/* 对接方通常没有后台账号，在登录页给出文档入口，
+            让他们不必先找我们要一个账号才能看到接口说明。 */}
+        <div style={{ marginTop: 18, textAlign: 'center', fontSize: 13 }}>
+          <a href="/docs" target="_blank" rel="noreferrer">
+            开放接口文档
+          </a>
+          <span style={{ color: '#c3c9d4', margin: '0 8px' }}>·</span>
+          <a href="/">买家商城</a>
+        </div>
       </div>
     </div>
   );

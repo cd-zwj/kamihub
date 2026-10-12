@@ -110,6 +110,55 @@ func (c *Client) Allow(ctx context.Context, key string, limit int, window time.D
 	return res == 1
 }
 
+// peekScript 只读取当前计数，不自增。
+var peekScript = redis.NewScript(`
+local current = redis.call("GET", KEYS[1])
+if not current then
+    return 0
+end
+return tonumber(current)
+`)
+
+// AllowN 只读检查：当前计数是否已达上限。不自增。
+//
+// 与 Allow 的区别，用在「只统计失败」的场景（例如登录）：
+// 先 AllowN 判断是否该拒绝，真正失败后再用 Fail 记账。
+// 这样成功登录不会消耗配额，正常用户不会被自己的成功登录拖到限流。
+func (c *Client) AllowN(ctx context.Context, key string, limit int) bool {
+	if limit <= 0 {
+		return true
+	}
+	n, err := peekScript.Run(ctx, c.rdb, []string{key}).Int()
+	if err != nil {
+		slog.Warn("限流检查失败，降级放行", "key", key, "error", err.Error())
+		return true
+	}
+	return n < limit
+}
+
+// Fail 记录一次失败。首次失败时才设置过期时间，
+// 因此窗口是从「第一次失败」开始算，而不是从第一次请求开始。
+func (c *Client) Fail(ctx context.Context, key string, window time.Duration) {
+	n, err := c.rdb.Incr(ctx, key).Result()
+	if err != nil {
+		slog.Warn("记录失败次数失败", "key", key, "error", err.Error())
+		return
+	}
+	if n == 1 {
+		c.rdb.PExpire(ctx, key, window)
+	}
+}
+
+// Reset 清空计数。登录成功后调用，让正常用户立刻恢复额度。
+func (c *Client) Reset(ctx context.Context, keys ...string) {
+	if len(keys) == 0 {
+		return
+	}
+	if err := c.rdb.Del(ctx, keys...).Err(); err != nil {
+		slog.Warn("重置限流计数失败", "keys", keys, "error", err.Error())
+	}
+}
+
 // SetNX 简单占位，用于幂等快路径
 func (c *Client) SetNX(ctx context.Context, key string, value string, ttl time.Duration) (bool, error) {
 	return c.rdb.SetNX(ctx, key, value, ttl).Result()

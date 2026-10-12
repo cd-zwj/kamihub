@@ -19,12 +19,25 @@ var (
 	ErrUserDisabled       = errors.New("账号已被禁用")
 )
 
-// Claims JWT 载荷
+// Claims JWT 载荷（员工）
 type Claims struct {
 	UserID   uint   `json:"uid"`
 	Username string `json:"username"`
 	Role     string `json:"role"`
+	// Type 令牌类型，固定为 TokenTypeStaff。
+	//
+	// 为兼容 C 端上线前签发的历史令牌，空值一律按 staff 处理
+	// （见 IsStaffToken）。新签发的令牌一定会带上该字段。
+	Type string `json:"typ,omitempty"`
 	jwt.RegisteredClaims
+}
+
+// IsStaffToken 判断该令牌是否属于员工体系。
+//
+// 空 typ 视为员工，是为了让 C 端上线前签发的旧令牌继续有效；
+// 买家令牌的 typ 恒为 buyer，因此永远无法通过这里。
+func (c *Claims) IsStaffToken() bool {
+	return c.Type == "" || c.Type == TokenTypeStaff
 }
 
 // AuthService 负责登录、令牌签发与用户管理。
@@ -110,6 +123,7 @@ func (s *AuthService) IssueToken(ctx context.Context, user *models.User, ttl tim
 		UserID:   user.ID,
 		Username: user.Username,
 		Role:     user.Role,
+		Type:     TokenTypeStaff,
 		RegisteredClaims: jwt.RegisteredClaims{
 			IssuedAt:  jwt.NewNumericDate(now),
 			NotBefore: jwt.NewNumericDate(now),

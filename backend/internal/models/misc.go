@@ -13,11 +13,13 @@ import (
 //	brand          品牌（站点名/Logo/页脚）
 //	delivery_page  提货页显示项与附加内容模板
 //	security       提货链接默认有效期等
+//	payment        第三方支付（易支付）配置与开关
 const (
 	SettingContact      = "contact"
 	SettingBrand        = "brand"
 	SettingDeliveryPage = "delivery_page"
 	SettingSecurity     = "security"
+	SettingPayment      = "payment"
 )
 
 type Setting struct {

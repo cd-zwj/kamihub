@@ -2,8 +2,11 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -109,17 +112,31 @@ func (h *Handlers) listOrderAttempts(c *gin.Context) {
 // 这是「用 API 方式把购买的内容发出去」的入口：调用方拿到订单详情与提货链接。
 func (h *Handlers) createOrder(c *gin.Context) {
 	var req struct {
-		RequestID string `json:"request_id" binding:"required"`
-		GoodsCode string `json:"goods_code" binding:"required"`
-		Quantity  int    `json:"quantity"`
-		Remark    string `json:"remark"`
-		TTLHours  int    `json:"ttl_hours"`
+		// 这三个字段用 flexString / flexInt 而不是原生类型。
+		//
+		// 原因是被实际对接踩出来的：发卡系统 / 中间层拼 JSON 时，
+		// request_id 常常是裸数字（{"request_id": 12345}），quantity 有时是
+		// 字符串 "1"、有时是 ""。原生 string / int 遇到这些一律
+		// "cannot unmarshal ... into Go struct field"，而调用方拿到的
+		// 只有一句「请求参数不合法」，根本对不上是自己哪个字段写错了。
+		// 兼容掉这些常见形态，比强迫每个对接方都改代码更划算。
+		RequestID string  `json:"request_id" binding:"required"`
+		GoodsCode string  `json:"goods_code" binding:"required"`
+		Quantity  flexInt `json:"quantity"`
+		Remark    string  `json:"remark"`
+		TTLHours  flexInt `json:"ttl_hours"`
 		// ResponseMode 控制「成功响应」的形态，专为对接方设计：
-		// 有些发卡系统只能把响应体整段取走，无法按 JSON 路径提取字段，
-		// 拿到完整 JSON 就没法直接给买家。这些系统可以把本字段设成
-		//   url    -> 只返回提货链接（纯文本）
+		//
+		//   json   -> 仍是 JSON，但把提货链接抬到 code/msg/data 一层
+		//             （data.link），对接方用 JSON 路径就能取值，不必下钻
+		//   url    -> 只返回提货链接（纯文本），给「整段取走」的发卡系统
 		//   cards  -> 只返回卡密（纯文本，多张时每行一个）
+		//   text   -> 与 url 同义；link 同理
 		//   full   -> 完整 JSON（默认，保持向后兼容）
+		//
+		// 之所以要新增 json：第三方发卡平台（如 EZAPI）多数只能配
+		// 「JSON 路径」而不能整段取走响应体。它们拿 url 模式的 text/plain
+		// 一行文本去解 JSON 会直接失败，表现出来就是「下单成功但没返回东西」。
 		// 失败时一律仍返回标准的 JSON 错误信封 + 对应 HTTP 状态码，
 		// 对接方按 HTTP 状态码判断成败即可。
 		ResponseMode string `json:"response_mode"`
@@ -130,11 +147,11 @@ func (h *Handlers) createOrder(c *gin.Context) {
 
 	user := CurrentUser(c)
 	order, err := h.orders.Create(c.Request.Context(), service.CreateOrderInput{
-		RequestID: req.RequestID,
+		RequestID: strings.TrimSpace(req.RequestID),
 		GoodsCode: req.GoodsCode,
-		Quantity:  req.Quantity,
+		Quantity:  int(req.Quantity),
 		Remark:    req.Remark,
-		TTLHours:  req.TTLHours,
+		TTLHours:  int(req.TTLHours),
 		UserID:    &user.ID,
 	})
 	if err != nil {
@@ -154,13 +171,52 @@ func (h *Handlers) createOrder(c *gin.Context) {
 		"status": order.Status, "goods": req.GoodsCode, "quantity": order.Quantity,
 	})
 
-	// 纯文本模式：直接把对接方要的那一个值作为响应体返回
 	switch strings.ToLower(strings.TrimSpace(req.ResponseMode)) {
 	case "url", "link", "text":
+		// 纯文本模式：直接把提货链接作为响应体返回。
+		// 适合能把响应体整段取走的发卡系统 —— 拿到什么就发给买家什么。
+		//
+		// 订单没发货成功时这里绝不能回 200 + 空字符串：第三方发卡平台拿到
+		// 一个空的 200，只会把它当成「卡密是空白的」发给买家，客服那边
+		// 收到的投诉是「下单成功但没返回东西」，而真实原因是订单失败了。
+		// 失败就按失败返回：错误信封 + 对应 HTTP 状态码，让上游把这一单挂起。
+		if order.Status != models.OrderStatusDelivered {
+			Abort(c, failedOrderError(order))
+			return
+		}
 		c.String(http.StatusOK, deliveryURL)
 		return
 	case "cards", "card", "cardno":
+		// 纯文本模式：只返回卡密，多张时每行一个。
+		// 同上：订单失败时不能回空 200。
+		if order.Status != models.OrderStatusDelivered {
+			Abort(c, failedOrderError(order))
+			return
+		}
 		c.String(http.StatusOK, strings.Join(cards, "\n"))
+		return
+	case "json":
+		// 仍然是 JSON，但把调用方真正要的东西抬到顶层：
+		//   link      提货链接（等价于 full 的 data.delivery_url）
+		//   cards     卡密明文数组
+		//   order_no  订单号，便于对账
+		// 对接方只要配一个 JSON 路径（例如 data.link）就能取值，
+		// 不必再下钻 data.order.xxx。
+		//
+		// 同时保留 code/msg/time 三个公共字段，与其它接口的错误信封同构，
+		// 对接方用同一套判断逻辑就能区分成败。
+		c.JSON(http.StatusOK, gin.H{
+			"code": 1,
+			"msg":  "success",
+			"time": time.Now().Unix(),
+			"data": gin.H{
+				"link":           deliveryURL,
+				"cards":          cards,
+				"order_no":       order.OrderNo,
+				"delivery_token": deliveryToken,
+				"quantity":       order.Quantity,
+			},
+		})
 		return
 	}
 
@@ -228,4 +284,98 @@ func cardList(o models.Order) []string {
 		}
 	}
 	return out
+}
+
+// failedOrderError 把「订单落库了但没发货成功」翻译成一个 API 错误。
+//
+// 采购接口对失败订单的处理是「返回订单对象 + HTTP 200」，这在 full 模式下
+// 没问题（调用方能读 status 字段），但对 url / cards 这种纯文本模式是致命的：
+// 响应体只能是链接或卡密，订单失败时它就是个空字符串，调用方无从分辨。
+// 所以这些模式下一律转成错误信封。
+func failedOrderError(order *models.Order) error {
+	msg := strings.TrimSpace(order.ErrorMsg)
+	if msg == "" {
+		msg = "订单未发货成功"
+	}
+	return fmt.Errorf("订单 %s 发货失败：%s", order.OrderNo, msg)
+}
+
+// flexInt 是一个「宽容的整数」：JSON 里写 1、"1"、"" 、null 都能收。
+//
+// 为什么不用原生 int：发卡系统模板替换出来的值经常是字符串，
+// 空模板变量则变成 ""。原生 int 遇到这两种直接解析失败，
+// 调用方只看到「请求参数不合法」，排查成本极高。
+// "" 和 null 一律当成「没传」，由后续逻辑取默认值。
+type flexInt int
+
+func (f *flexInt) UnmarshalJSON(b []byte) error {
+	s := strings.TrimSpace(string(b))
+	if s == "" || s == "null" {
+		*f = 0
+		return nil
+	}
+	// 去掉可能存在的引号
+	s = strings.Trim(s, `"`)
+	if s == "" {
+		*f = 0
+		return nil
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		// 兼容 "1.0" 这种浮点写法
+		fl, ferr := strconv.ParseFloat(s, 64)
+		if ferr != nil {
+			return fmt.Errorf("数量必须是整数，收到的是 %q", s)
+		}
+		n = int(fl)
+	}
+	*f = flexInt(n)
+	return nil
+}
+
+// cancelOrder 撤销一笔已发货的订单：决定卡密去向 + 作废提货链接 + 订单转 cancelled。
+//
+// 权限：管理员。撤销涉及卡密库存与营收，操作员不应有。
+func (h *Handlers) cancelOrder(c *gin.Context) {
+	id, ok := uintParam(c, "id")
+	if !ok {
+		return
+	}
+	var req struct {
+		Reason     string `json:"reason"`
+		CardAction string `json:"card_action"` // return / void / keep，留空用商品默认
+		ForceView  bool   `json:"force_view"`  // 已查看过时是否仍强行退回
+	}
+	// body 可以整个为空（只撤销、用全部默认值），所以这里不用 BindJSON 强校验
+	if c.Request.ContentLength > 0 {
+		_ = c.ShouldBindJSON(&req)
+	}
+
+	user := CurrentUser(c)
+	res, err := h.orders.Cancel(c.Request.Context(), id, service.CancelOptions{
+		Reason:     req.Reason,
+		CardAction: req.CardAction,
+		ForceView:  req.ForceView,
+		UserID:     &user.ID,
+	})
+	if err != nil {
+		Abort(c, err)
+		return
+	}
+
+	h.auditLog(c, "order.cancel", "order", res.Order.OrderNo, gin.H{
+		"card_action": res.CardAction,
+		"card_count":  res.CardCount,
+		"view_count":  res.ViewCount,
+		"force_view":  req.ForceView,
+		"reason":      req.Reason,
+	})
+
+	OK(c, gin.H{
+		"order":       res.Order,
+		"card_action": res.CardAction,
+		"card_count":  res.CardCount,
+		"view_count":  res.ViewCount,
+		"warn":        res.Warn,
+	})
 }

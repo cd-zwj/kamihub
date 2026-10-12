@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
+  Checkbox,
   Alert, Button, Card, Drawer, Form, Input, InputNumber, Modal, Popconfirm, Select,
   Space, Switch, Table, Tag, Tooltip, Typography, message,
 } from 'antd';
@@ -8,11 +9,17 @@ import {
 } from '@ant-design/icons';
 import { api, toastError } from '@/api/client';
 import {
-  DELIVERY_MODE_TEXT, STRATEGY_HINT, strategyText,
+  DELIVERY_MODE_TEXT, STOCK_MODE_TEXT, STRATEGY_HINT, strategyText,
   type Goods, type Platform, type StrategyMeta, type Supply,
 } from '@/api/types';
 import { fmtTime, money, yuan } from '@/utils/format';
 import { useAuth } from '@/auth/AuthContext';
+import CardPoolDrawer from '@/components/CardPoolDrawer';
+import ImageUploader from '@/components/ImageUploader';
+
+/** 供货方式：向上游平台采购（默认） / 用商品自带的卡密池发货 */
+const STOCK_MODE_UPSTREAM = 1;
+const STOCK_MODE_LOCAL = 2;
 
 export default function GoodsPage() {
   const { isAdmin } = useAuth();
@@ -31,6 +38,15 @@ export default function GoodsPage() {
   const [form] = Form.useForm();
   // useWatch 必须在组件顶层调用，不能放进渲染回调里
   const routingStrategy = Form.useWatch('routing_strategy', form);
+  // 供货方式决定表单上显示「货源路由」还是「卡密与使用说明」。
+  //
+  // 这里必须用常量兜底：Modal 带 destroyOnClose，字段在弹窗打开前根本没挂载，
+  // useWatch 此时返回 undefined；下面按 stockMode === STOCK_MODE_LOCAL 判断，
+  // 若某处漏了兜底就会把「自有卡密」误判成「上游采购」，整块表单渲染成错的那套。
+  const stockMode = Form.useWatch('stock_mode', form) ?? STOCK_MODE_UPSTREAM;
+
+  // 卡密池抽屉（仅自建商品用）
+  const [cardGoods, setCardGoods] = useState<Goods | null>(null);
 
   // 货源抽屉
   const [supplyGoods, setSupplyGoods] = useState<Goods | null>(null);
@@ -85,12 +101,16 @@ export default function GoodsPage() {
     form.setFieldsValue({
       status: 1,
       delivery_mode: 1,
+      stock_mode: STOCK_MODE_UPSTREAM,
       routing_strategy: 'priority',
       failover_enabled: true,
       max_attempts: 3,
       max_quantity: 1,
       price: 0,
       max_supply_price: 0,
+      cost_price: 0,
+      // 撤销订单时卡密的默认去向：默认不退回，保守取值。
+      return_card_on_cancel: false,
     });
     setOpen(true);
   }
@@ -114,6 +134,10 @@ export default function GoodsPage() {
       // 后端用 decimal 字符串返回，InputNumber 需要数字
       max_supply_price: Number(row.max_supply_price ?? 0),
       extra_template: row.extra_template,
+      stock_mode: row.stock_mode ?? STOCK_MODE_UPSTREAM,
+      cost_price: Number(row.cost_price ?? 0),
+      usage_instruction: row.usage_instruction ?? '',
+      return_card_on_cancel: row.return_card_on_cancel ?? false,
     });
     setOpen(true);
   }
@@ -130,9 +154,18 @@ export default function GoodsPage() {
       if (editing) {
         await api.updateGoods(editing.id, values);
         message.success('已保存');
+        // 顺手导入的卡密在编辑弹窗里也支持，提示一下进了多少条
+        const initCards = String(values.init_cards || '').trim();
+        if (initCards) {
+          message.info('随本次保存导入的卡密可在「卡密池」里查看');
+        }
       } else {
-        await api.createGoods(values);
+        const created = await api.createGoods(values);
         message.success('商品已创建');
+        // 自建商品建完就该去贴卡密 —— 直接带过去，少一步点击
+        if ((created.stock_mode ?? STOCK_MODE_UPSTREAM) === STOCK_MODE_LOCAL) {
+          setCardGoods(created);
+        }
       }
       setOpen(false);
       await load();
@@ -404,16 +437,48 @@ export default function GoodsPage() {
             },
             { title: '售价', dataIndex: 'price', width: 100, render: (v) => yuan(v) },
             {
-              // 把成本红线摆在列表里，运营一眼能看出哪些商品还没设限价
-              title: '最高供应价',
-              width: 130,
+              // 供货方式决定了这个商品是怎么发货的，摆在最前面
+              title: '供货方式',
+              width: 120,
+              render: (_, r) =>
+                (r.stock_mode ?? STOCK_MODE_UPSTREAM) === STOCK_MODE_LOCAL ? (
+                  <Tooltip title="卡密存在你自己这里，卖出后从卡密池直接发货，不经过任何上游平台">
+                    <Tag color="purple" style={{ cursor: 'help' }}>
+                      {STOCK_MODE_TEXT[2]}
+                    </Tag>
+                  </Tooltip>
+                ) : (
+                  <Tag>{STOCK_MODE_TEXT[1]}</Tag>
+                ),
+            },
+            {
+              // 自建商品看的不是「最高供应价」而是「可售卡密」，
+              // 这两列互斥，合成一列显示才不会出现一整片无意义的横杠。
+              title: '成本 / 库存',
+              width: 150,
               render: (_, r) => {
+                if ((r.stock_mode ?? STOCK_MODE_UPSTREAM) === STOCK_MODE_LOCAL) {
+                  const avail = r.card_available ?? 0;
+                  const total = r.card_total ?? 0;
+                  return (
+                    <Space direction="vertical" size={0}>
+                      <Tooltip title={`单条成本 ${yuan(r.cost_price)}，毛利按售价减成本算`}>
+                        <span style={{ cursor: 'help' }}>成本 {yuan(r.cost_price)}</span>
+                      </Tooltip>
+                      <Tooltip title={`卡密池：可售 ${avail} / 合计 ${total}`}>
+                        <Tag color={avail > 0 ? 'success' : 'error'} style={{ cursor: 'help' }}>
+                          可售 {avail}
+                        </Tag>
+                      </Tooltip>
+                    </Space>
+                  );
+                }
                 const v = Number(r.max_supply_price ?? 0);
                 if (!v) return <Tag>不限</Tag>;
                 return (
                   <Tooltip title="单笔应付总额超过此价的货源会被跳过">
                     <Tag color={v < Number(r.price) ? 'error' : 'blue'} style={{ cursor: 'help' }}>
-                      {yuan(v)}
+                      限价 {yuan(v)}
                     </Tag>
                   </Tooltip>
                 );
@@ -428,6 +493,10 @@ export default function GoodsPage() {
               title: '选货策略',
               width: 170,
               render: (_, r) => {
+                // 自有卡密商品没有「选货」这回事，显示策略只会误导运营
+                if ((r.stock_mode ?? STOCK_MODE_UPSTREAM) === STOCK_MODE_LOCAL) {
+                  return <Typography.Text type="secondary">不适用</Typography.Text>;
+                }
                 const s = strategies.find((x) => x.name === r.routing_strategy);
                 return (
                   <Space size={4}>
@@ -456,6 +525,9 @@ export default function GoodsPage() {
               title: '货源',
               width: 110,
               render: (_, r) => {
+                if ((r.stock_mode ?? STOCK_MODE_UPSTREAM) === STOCK_MODE_LOCAL) {
+                  return <Typography.Text type="secondary">卡密池</Typography.Text>;
+                }
                 const n = r.supplies?.length ?? 0;
                 return n > 0 ? <Tag color="green">{n} 个</Tag> : <Tag color="warning">未配置</Tag>;
               },
@@ -466,9 +538,15 @@ export default function GoodsPage() {
               fixed: 'right',
               render: (_, r) => (
                 <Space size={4}>
-                  <Button size="small" type="link" onClick={() => void openSupplies(r)}>
-                    货源管理
-                  </Button>
+                  {(r.stock_mode ?? STOCK_MODE_UPSTREAM) === STOCK_MODE_LOCAL ? (
+                    <Button size="small" type="link" onClick={() => setCardGoods(r)}>
+                      卡密池
+                    </Button>
+                  ) : (
+                    <Button size="small" type="link" onClick={() => void openSupplies(r)}>
+                      货源管理
+                    </Button>
+                  )}
                   {isAdmin && (
                     <>
                       <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(r)} />
@@ -499,10 +577,32 @@ export default function GoodsPage() {
         confirmLoading={saving}
         okText="保存"
         cancelText="取消"
-        width={680}
+        width={720}
         destroyOnClose
       >
-        <Form form={form} layout="vertical" style={{ marginTop: 8 }}>
+        <Form
+          form={form}
+          layout="vertical"
+          style={{ marginTop: 8 }}
+          // initialValues 在字段挂载那一刻就生效，不受 destroyOnClose 影响。
+          // 有了它，「供货方式」下拉在任何情况下都不会渲染成空值；
+          // openCreate 里的 setFieldsValue 是第二道保险。
+          initialValues={{ stock_mode: STOCK_MODE_UPSTREAM }}
+        >
+          {/* 供货方式是这套表单的总开关：上游商品要配货源路由，
+              自建商品要贴卡密 + 写使用说明，两套字段互斥，不能同时显示 */}
+          <Form.Item
+            name="stock_mode"
+            label="供货方式"
+            extra="上游采购：下单时去卡密平台买。自有卡密：卡密已在你自己手里，卖出后从卡密池直接发。"
+          >
+            <Select
+              options={[
+                { value: STOCK_MODE_UPSTREAM, label: '上游采购（挂平台货源，自动比价/故障转移）' },
+                { value: STOCK_MODE_LOCAL, label: '自有卡密（自己导入卡密，不依赖任何平台）' },
+              ]}
+            />
+          </Form.Item>
           <Space size={12} style={{ display: 'flex' }} wrap>
             <Form.Item
               name="code"
@@ -526,9 +626,9 @@ export default function GoodsPage() {
             <Input.TextArea rows={2} placeholder="可选" />
           </Form.Item>
 
-          <Space size={12} wrap>
-            <Form.Item name="image" label="商品图片 URL" style={{ minWidth: 300, flex: 1 }}>
-              <Input placeholder="https://... 会显示在提货页" />
+          <Space size={12} wrap align="start">
+            <Form.Item name="image" label="商品图片" style={{ minWidth: 320, flex: 1 }}>
+              <ImageUploader hint="会显示在提货页与买家商城的商品卡片上。支持 JPG / PNG / WebP / GIF，单张不超过 5 MB。" />
             </Form.Item>
             <Form.Item name="category" label="分类" style={{ width: 160 }}>
               <Input placeholder="可选" />
@@ -559,58 +659,121 @@ export default function GoodsPage() {
             <Form.Item name="max_quantity" label="单次数量上限" style={{ width: 150 }}>
               <InputNumber min={1} max={10000} style={{ width: '100%' }} />
             </Form.Item>
-            <Form.Item
-              name="max_supply_price"
-              label="最高供应价(元)"
-              style={{ width: 190 }}
-              extra={
-                <span style={{ fontSize: 12 }}>
-                  单笔应付总额上限（含上游手续费）。超过此价的货源会被跳过，0 = 不限制
-                </span>
-              }
-            >
-              <InputNumber
-                min={0}
-                step={0.01}
-                style={{ width: '100%' }}
-                placeholder="0 = 不限制"
-              />
-            </Form.Item>
-          </Space>
-
-          <Typography.Text strong style={{ fontSize: 13 }}>
-            货源路由
-          </Typography.Text>
-          <div style={{ marginTop: 8, marginBottom: 8 }}>
-            <Space size={12} wrap>
+            {stockMode !== STOCK_MODE_LOCAL && (
               <Form.Item
-                name="routing_strategy"
-                label="选货策略"
-                style={{ minWidth: 260 }}
+                name="max_supply_price"
+                label="最高供应价(元)"
+                style={{ width: 190 }}
                 extra={
                   <span style={{ fontSize: 12 }}>
-                    {STRATEGY_HINT[routingStrategy as string] ||
-                      strategies.find((s) => s.name === routingStrategy)?.description}
+                    单笔应付总额上限（含上游手续费）。超过此价的货源会被跳过，0 = 不限制
                   </span>
                 }
               >
-                {/* 标签显示中文，值仍是后端标识，避免影响接口 */}
-                <Select
-                  options={strategies.map((s) => ({
-                    value: s.name,
-                    label: strategyText(s.name),
-                    title: s.description,
-                  }))}
+                <InputNumber
+                  min={0}
+                  step={0.01}
+                  style={{ width: '100%' }}
+                  placeholder="0 = 不限制"
                 />
               </Form.Item>
-              <Form.Item name="failover_enabled" label="失败自动切换货源" valuePropName="checked">
-                <Switch />
+            )}
+          </Space>
+
+          {stockMode === STOCK_MODE_LOCAL ? (
+            <>
+              {/* ---------------- 自有卡密商品 ---------------- */}
+              <Typography.Text strong style={{ fontSize: 13 }}>
+                卡密与使用说明
+              </Typography.Text>
+              <Alert
+                type="success"
+                showIcon
+                style={{ margin: '8px 0' }}
+                message="这类商品的库存就是卡密池里的卡密"
+                description="下单后系统自动取一条卡密发出。保存后可在列表里点「卡密池」导入卡密、查看已售记录。"
+              />
+
+              <Space size={12} wrap>
+                <Form.Item
+                  name="cost_price"
+                  label="成本价(元/条)"
+                  style={{ width: 190 }}
+                  extra={<span style={{ fontSize: 12 }}>仅用于算毛利，买家看不到</span>}
+                >
+                  <InputNumber min={0} step={0.01} style={{ width: '100%' }} />
+                </Form.Item>
+              </Space>
+
+              <Form.Item
+                name="return_card_on_cancel"
+                valuePropName="checked"
+                extra="撤销订单时卡密的默认去向。默认不勾选 = 作废卡密（不退回），这是保守取值：卡密一旦被买家查看过，退回池子就会被二次卖出。需要退回时可在撤销弹窗里逐单改。"
+              >
+                <Checkbox>撤销订单时，默认把卡密退回卡密池</Checkbox>
               </Form.Item>
-              <Form.Item name="max_attempts" label="最多尝试货源数" style={{ width: 160 }}>
-                <InputNumber min={1} max={20} style={{ width: '100%' }} />
+
+              <Form.Item
+                name="usage_instruction"
+                label="使用说明（买家看到的「使用方式」）"
+                extra="卡密和使用方式是一套的。这里写通用的使用步骤，买家在提货页会看到这份说明；留空则提货页不显示使用说明。"
+              >
+                <Input.TextArea
+                  rows={6}
+                  placeholder={'1. 打开官网 xxx.com\n2. 输入卡密兑换\n3. 兑换后 24 小时内生效\n（如有问题请联系客服）'}
+                />
               </Form.Item>
-            </Space>
-          </div>
+
+              <Form.Item
+                name="init_cards"
+                label={editing ? '追加卡密（每行一条，可留空）' : '卡密（每行一条）'}
+                extra="重复的卡密会自动跳过，不会被卖两次。也可以在保存后到「卡密池」里批量导入。"
+              >
+                <Input.TextArea
+                  rows={6}
+                  style={{ fontFamily: 'monospace' }}
+                  placeholder={'AAAA-BBBB-CCCC\nDDDD-EEEE-FFFF'}
+                />
+              </Form.Item>
+            </>
+          ) : (
+            <>
+              {/* ---------------- 上游采购商品 ---------------- */}
+              <Typography.Text strong style={{ fontSize: 13 }}>
+                货源路由
+              </Typography.Text>
+              <div style={{ marginTop: 8, marginBottom: 8 }}>
+                <Space size={12} wrap>
+                  <Form.Item
+                    name="routing_strategy"
+                    label="选货策略"
+                    style={{ minWidth: 260 }}
+                    extra={
+                      <span style={{ fontSize: 12 }}>
+                        {STRATEGY_HINT[routingStrategy as string] ||
+                          strategies.find((s) => s.name === routingStrategy)?.description}
+                      </span>
+                    }
+                  >
+                    {/* 标签显示中文，值仍是后端标识，避免影响接口 */}
+                    <Select
+                      options={strategies.map((s) => ({
+                        value: s.name,
+                        label: strategyText(s.name),
+                        title: s.description,
+                      }))}
+                    />
+                  </Form.Item>
+                  <Form.Item name="failover_enabled" label="失败自动切换货源" valuePropName="checked">
+                    <Switch />
+                  </Form.Item>
+                  <Form.Item name="max_attempts" label="最多尝试货源数" style={{ width: 160 }}>
+                    <InputNumber min={1} max={20} style={{ width: '100%' }} />
+                  </Form.Item>
+                </Space>
+              </div>
+            </>
+          )}
 
           <Form.Item
             name="extra_template"
@@ -949,6 +1112,14 @@ export default function GoodsPage() {
           ]}
         />
       </Modal>
+
+      {/* ---------------- 卡密池（仅自有卡密商品） ---------------- */}
+      <CardPoolDrawer
+        goods={cardGoods}
+        isAdmin={isAdmin}
+        onClose={() => setCardGoods(null)}
+        onChanged={() => void load()}
+      />
     </>
   );
 }

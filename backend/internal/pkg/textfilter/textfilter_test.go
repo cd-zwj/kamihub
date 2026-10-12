@@ -6,9 +6,9 @@ import (
 )
 
 // 真实场景：上游供货商在使用说明里夹带自己的 QQ 群 / 微信。
-// 下面这串是线上真实返回过的富文本的结构（域名与号码已脱敏替换）。
+// 下面这串是线上真实返回过的富文本（已简化）。
 const realInstruction = `<p>访问以下网址输入卡密兑换激活链接</p>
-<p>https://redeem.example.com/</p>
+<p>https://gemini.aisuper.store/</p>
 <p>购买后请1小时内使用</p>
 <p>加群123456789领取福利</p>
 <p>客服微信：kf_8888</p>
@@ -32,7 +32,7 @@ func TestApply_替换联系方式(t *testing.T) {
 		t.Error("替换文本没有生效")
 	}
 	// 正常说明必须保留 —— 替换不能把有用的内容一起干掉
-	if !strings.Contains(got, "redeem.example.com") {
+	if !strings.Contains(got, "gemini.aisuper.store") {
 		t.Error("正常的兑换地址被误删了")
 	}
 	if !strings.Contains(got, "1小时内使用") {

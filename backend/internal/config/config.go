@@ -22,11 +22,28 @@ type Config struct {
 	Crypto   Crypto
 	Delivery Delivery
 	Upstream Upstream
+	Upload   Upload
+}
+
+// Upload 商品图片上传。
+//
+// 图片存本地磁盘而不是对象存储：商品封面总量很小（几十张），
+// 走本地目录最简单，也不引入外部依赖与额外费用。
+// 目录通过 docker volume 持久化，容器重建不会丢。
+type Upload struct {
+	// Dir 保存目录。相对路径按进程工作目录解析。
+	Dir string
+	// MaxSizeMB 单张图片大小上限
+	MaxSizeMB int
+	// URLPrefix 对外访问前缀，与静态路由保持一致
+	URLPrefix string
 }
 
 type App struct {
-	Env         string // development / production
-	Host        string // 监听地址，如 127.0.0.1 或 0.0.0.0
+	Env string // development / production
+	// Host 监听地址，如 127.0.0.1 或 0.0.0.0。
+	// 默认只监听回环；容器/反代场景由 docker-compose 显式设成 0.0.0.0。
+	Host        string
 	Port        int
 	BaseURL     string // 对外访问地址，用于拼提货链接，如 https://api.example.com
 	LogLevel    string
@@ -150,6 +167,11 @@ func Load() (*Config, error) {
 			PollInterval: envDuration("UPSTREAM_POLL_INTERVAL", 2*time.Second),
 			VerifySupply: envBool("UPSTREAM_VERIFY_SUPPLY", true),
 		},
+		Upload: Upload{
+			Dir:       env("UPLOAD_DIR", "./data/uploads"),
+			MaxSizeMB: envInt("UPLOAD_MAX_MB", 5),
+			URLPrefix: "/uploads",
+		},
 	}
 
 	if err := cfg.validate(); err != nil {
@@ -187,6 +209,10 @@ func (c *Config) validate() error {
 
 	if c.Delivery.DefaultTTL <= 0 {
 		problems = append(problems, "DELIVERY_DEFAULT_TTL 必须大于 0")
+	}
+
+	if c.Upload.MaxSizeMB < 1 || c.Upload.MaxSizeMB > 50 {
+		problems = append(problems, fmt.Sprintf("UPLOAD_MAX_MB 需在 1~50 之间，当前 %d", c.Upload.MaxSizeMB))
 	}
 
 	if len(problems) > 0 {

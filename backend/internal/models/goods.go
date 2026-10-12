@@ -28,6 +28,14 @@ const (
 	StrategyWeighted = "weighted" // 加权轮询
 )
 
+// 供货方式：商品从哪里拿货
+const (
+	// StockModeUpstream 向上游平台采购（挂 Supply 货源）
+	StockModeUpstream = 1
+	// StockModeLocal 用商品自带的卡密池本地发货（不依赖任何上游平台）
+	StockModeLocal = 2
+)
+
 // AllStrategies 供前端下拉使用
 var AllStrategies = []string{StrategyPriority, StrategyCheapest, StrategyStock, StrategyWeighted}
 
@@ -52,6 +60,26 @@ type Goods struct {
 	// 单次采购数量上限
 	MaxQuantity int `gorm:"not null;default:1" json:"max_quantity"`
 
+	// StockMode 供货方式，决定下单时去哪儿找货：
+	//
+	//	StockModeUpstream(1) —— 向上游平台的货源（Supply）采购，默认，历史行为
+	//	StockModeLocal(2)    —— 用商品自带的卡密池（card_stocks）本地发货
+	//
+	// 为什么需要它：有些商品运营自己手里就有卡密，不需要任何上游平台。
+	// 这类商品没有 Supply，按老逻辑永远「没有可用的货源」而下不了单。
+	StockMode int `gorm:"not null;default:1" json:"stock_mode"`
+
+	// CostPrice 自建商品的单条成本价。仅用于算毛利与给定价做参考，
+	// 不参与下单判定（上游商品的成本红线是 MaxSupplyPrice）。
+	CostPrice decimal.Decimal `gorm:"type:numeric(12,2);default:0" json:"cost_price"`
+
+	// UsageInstruction 自建商品的通用「使用说明」。
+	//
+	// 「卡密 + 使用方式」是一套的，所以放在商品上：同一个商品的所有卡密
+	// 共用同一份说明。下单时它会被固化进订单（order.instruction），
+	// 之后再改商品说明不会影响已经发出去的订单。
+	UsageInstruction string `gorm:"type:text" json:"usage_instruction"`
+
 	// MaxSupplyPrice 最高供应价（每笔采购应付总额上限，含上游手续费）。
 	//
 	// 用途：给商品设一条成本红线，保证不亏。采购时用询价返回的
@@ -61,6 +89,17 @@ type Goods struct {
 	// 0 表示不限制（保持与历史行为一致）。
 	MaxSupplyPrice decimal.Decimal `gorm:"type:numeric(12,2);default:0" json:"max_supply_price"`
 
+	// ReturnCardOnCancel 撤销订单时，卡密是否默认退回卡密池。
+	//
+	// 默认 false（不退回），这是刻意选的保守值：
+	// 卡密一旦暴露给买家看过，退回池子就会被二次卖给别人，
+	// 造成「两个人拿到同一张卡密」的重复发货。
+	// 所以默认按「作废处理」，要退回必须由运营显式打开。
+	//
+	// 注意这只是「默认值」：真正撤销订单时，弹窗里还能逐单覆盖。
+	// 放在商品上是因为退回策略通常跟商品品类相关，不是每单都要重选。
+	ReturnCardOnCancel bool `gorm:"not null;default:false" json:"return_card_on_cancel"`
+
 	// 提货页覆盖配置（为空则用全局设置）
 	PageOverride datatypes.JSON `gorm:"type:jsonb" json:"page_override"`
 
@@ -69,11 +108,22 @@ type Goods struct {
 
 	Supplies []Supply `gorm:"foreignKey:GoodsID" json:"supplies,omitempty"`
 
+	// CardTotal / CardAvailable 卡密池的统计值，不是数据库列。
+	//
+	// 标 `gorm:"-"` 是必须的：不标的话 GORM 会试图给它建列，
+	// 而这两个值每次都要现算（卡密池可能上万条，存冗余计数必然会不一致）。
+	// 列表和详情接口在返回前用 CardService 填上。
+	CardTotal     int64 `gorm:"-" json:"card_total"`
+	CardAvailable int64 `gorm:"-" json:"card_available"`
+
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
 func (Goods) TableName() string { return "goods" }
+
+// IsLocalStock 该商品是否走「自带卡密池」发货
+func (g *Goods) IsLocalStock() bool { return g.StockMode == StockModeLocal }
 
 // Supply 一条货源：某个商品在某个平台上的对应商品。
 // 一个商品下可以有多条 Supply，路由引擎据此做选择与故障转移。

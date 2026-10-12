@@ -17,6 +17,7 @@ import (
 // 上下文键
 const (
 	ctxUserKey      = "current_user"
+	ctxBuyerKey     = "current_buyer"
 	ctxRequestIDKey = "request_id"
 )
 
@@ -122,6 +123,10 @@ func CORS(allowedOrigins []string) gin.HandlerFunc {
 }
 
 // Auth 校验 JWT 并把用户放进上下文。
+//
+// 只接受员工令牌（typ=staff）：买家令牌即便签名有效也会被拒。
+// 这是必需的 —— buyers 与 users 的主键各自从 1 开始，
+// 若不做类型区分，买家 ID=1 的令牌会被当成员工 ID=1 直接进后台。
 func Auth(auth *service.AuthService) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		token := extractToken(c)
@@ -134,6 +139,10 @@ func Auth(auth *service.AuthService) gin.HandlerFunc {
 			Unauthorized(c, "访问令牌无效或已过期")
 			return
 		}
+		if !claims.IsStaffToken() {
+			Unauthorized(c, "访问令牌类型不匹配")
+			return
+		}
 		// 每次都回查用户，确保被禁用/删除的账号立即失效
 		user, err := auth.GetUser(c.Request.Context(), claims.UserID)
 		if err != nil {
@@ -143,6 +152,44 @@ func Auth(auth *service.AuthService) gin.HandlerFunc {
 		c.Set(ctxUserKey, user)
 		c.Next()
 	}
+}
+
+// BuyerAuth 校验买家 JWT 并把买家放进上下文。
+//
+// 与 Auth 完全对称：只接受 typ=buyer 的令牌，员工令牌无法通过。
+func BuyerAuth(auth *service.BuyerAuthService) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		token := extractToken(c)
+		if token == "" {
+			Unauthorized(c, "请先登录")
+			return
+		}
+		claims, err := auth.ParseBuyerToken(token)
+		if err != nil {
+			Unauthorized(c, "登录状态已失效，请重新登录")
+			return
+		}
+		buyer, err := auth.GetBuyer(c.Request.Context(), claims.BuyerID)
+		if err != nil {
+			Unauthorized(c, "账号不可用")
+			return
+		}
+		c.Set(ctxBuyerKey, buyer)
+		c.Next()
+	}
+}
+
+// CurrentBuyer 取当前登录买家
+func CurrentBuyer(c *gin.Context) *models.Buyer {
+	v, ok := c.Get(ctxBuyerKey)
+	if !ok {
+		return nil
+	}
+	b, ok := v.(*models.Buyer)
+	if !ok {
+		return nil
+	}
+	return b
 }
 
 // AdminOnly 要求管理员角色

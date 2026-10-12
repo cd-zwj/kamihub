@@ -2,10 +2,13 @@ import { useCallback, useEffect, useState } from 'react';
 import {
   Alert, Button, Card, Descriptions, Form, Input, InputNumber, Modal, Select, Space, Tag, Typography, message,
 } from 'antd';
-import { CopyOutlined, KeyOutlined, ThunderboltOutlined } from '@ant-design/icons';
+import { CopyOutlined, ExportOutlined, KeyOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import { api, toastError } from '@/api/client';
 import type { User } from '@/api/types';
 import { fmtTime } from '@/utils/format';
+
+/** 开放接口文档地址：用当前域名拼，避免写死环境 */
+const DOCS_URL = `${window.location.origin}/docs`;
 
 /** 常用有效期快捷键，省得心算小时数 */
 const TTL_PRESETS = [
@@ -163,6 +166,31 @@ export default function Tokens() {
             签发令牌
           </Button>
         </Form>
+      </Card>
+
+      <Card size="small" title="对接方文档" style={{ marginBottom: 14 }}>
+        <Typography.Paragraph style={{ marginBottom: 10 }}>
+          把下面这个地址发给对接方，他们可以<strong>免登录</strong>自助查看完整的接口说明
+          （鉴权、下单、查单、错误码、重试建议）。
+        </Typography.Paragraph>
+        <Space.Compact style={{ width: '100%' }}>
+          <Input value={DOCS_URL} readOnly onFocus={(e) => e.target.select()} />
+          <Button
+            icon={<CopyOutlined />}
+            onClick={() => {
+              navigator.clipboard?.writeText(DOCS_URL);
+              message.success('文档地址已复制');
+            }}
+          >
+            复制
+          </Button>
+          <Button type="primary" icon={<ExportOutlined />} onClick={() => window.open(DOCS_URL, '_blank')}>
+            打开文档
+          </Button>
+        </Space.Compact>
+        <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginTop: 8, marginBottom: 0 }}>
+          该页面无需登录即可访问，可直接发给外部合作方。
+        </Typography.Paragraph>
       </Card>
 
       <Card size="small" title="怎么用">

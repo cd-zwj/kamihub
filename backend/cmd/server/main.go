@@ -8,10 +8,12 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -55,6 +57,19 @@ func run() error {
 		"base_url", cfg.App.BaseURL,
 		"delivery_ttl", cfg.Delivery.DefaultTTL.String(),
 	)
+
+	// ---------- 上传目录 ----------
+	// 提前创建并**验证可写**。
+	//
+	// 只 MkdirAll 是不够的：目录可能已存在但属于别的用户
+	// （挂载命名卷时很常见 —— Docker 会以 root 新建挂载点，
+	// 而进程以非 root 的 app 用户运行）。
+	// 那种情况下要等运营真正上传图片才会报错，排查成本高；
+	// 这里在启动阶段就写一个探针文件，问题当场暴露。
+	if err := ensureWritableDir(cfg.Upload.Dir); err != nil {
+		return fmt.Errorf("上传目录不可写 %s: %w", cfg.Upload.Dir, err)
+	}
+	slog.Info("上传目录就绪", "dir", cfg.Upload.Dir, "max_mb", cfg.Upload.MaxSizeMB)
 
 	// ---------- 数据库 ----------
 	db, err := database.Connect(cfg)
@@ -100,11 +115,24 @@ func run() error {
 	routes := routing.NewRegistry()
 	settings := service.NewSettingsService(db)
 	platforms := service.NewPlatformService(db, registry, cfg.Crypto.Key)
-	goods := service.NewGoodsService(db, platforms, cfg.Upstream.VerifySupply)
+	// 卡密池：自建商品（不带上游货源）靠它本地发货
+	cards := service.NewCardService(db)
+	goods := service.NewGoodsService(db, platforms, cards, cfg.Upstream.VerifySupply)
 	deliveries := service.NewDeliveryService(db, cfg, settings)
-	orders := service.NewOrderService(db, cfg, c, platforms, settings, deliveries, routes)
+	orders := service.NewOrderService(db, cfg, c, platforms, settings, deliveries, routes, cards)
 	auth := service.NewAuthService(db, cfg, settings)
 	audit := service.NewAuditService(db)
+
+	// ---------- C 端购买平台 ----------
+	// 复用思路：采购与发卡继续走 orders（生产验证过的链路），
+	// C 端只新增「买家身份 / 上架定价 / 钱包」三块，不改动原有采购逻辑。
+	buyerAuth := service.NewBuyerAuthService(db, cfg)
+	listings := service.NewListingService(db, cards)
+	wallet := service.NewWalletService(db)
+	shopOrders := service.NewShopOrderService(db, listings, wallet, orders)
+	// 在线支付（易支付）：默认关闭，需管理员在后台「系统设置 → 在线支付」里
+	// 填好商户参数并打开开关后才会对买家可见。
+	payment := service.NewPaymentService(db, cfg, settings, wallet)
 
 	renderer, err := render.New()
 	if err != nil {
@@ -118,18 +146,39 @@ func run() error {
 		Auth:       auth,
 		Platforms:  platforms,
 		Goods:      goods,
+		Cards:      cards,
 		Orders:     orders,
 		Deliveries: deliveries,
 		Settings:   settings,
 		Audit:      audit,
 		Routes:     routes,
 		Renderer:   renderer,
+
+		BuyerAuth:  buyerAuth,
+		Listings:   listings,
+		Wallet:     wallet,
+		ShopOrders: shopOrders,
+		Payment:    payment,
 	})
 
 	// ---------- HTTP ----------
 	engine := gin.New()
 	if cfg.App.TrustProxy {
-		_ = engine.SetTrustedProxies(nil)
+		// 请求链路：外层 Nginx(宿主) -> web 容器内的 Nginx -> 本进程。
+		// 两跳都是容器私网地址，真实访客 IP 只在 X-Forwarded-For 的最左端。
+		// 注意：gin 默认只信任回环地址，且传 nil 会彻底关闭代理解析，
+		// 那样 c.ClientIP() 只能取到上一跳的容器 IP（172.22.0.x），
+		// 提货页访问日志、登录限流、审计日志都会记错人。
+		if err := engine.SetTrustedProxies([]string{
+			"127.0.0.1/32",
+			"::1/128",
+			// Docker 默认 bridge / compose 自定义网络的私网段
+			"10.0.0.0/8",
+			"172.16.0.0/12",
+			"192.168.0.0/16",
+		}); err != nil {
+			return fmt.Errorf("设置可信代理失败: %w", err)
+		}
 	}
 	handlers.Register(engine)
 
@@ -165,6 +214,39 @@ func run() error {
 	return nil
 }
 
+// ensureWritableDir 创建目录并实际写一个探针文件，确认进程有写权限。
+//
+// 为什么不能只 MkdirAll：目录可能已存在但没有写权限
+// （挂载命名卷时 Docker 会以 root 新建挂载点，而进程是非 root 用户）。
+// MkdirAll 对已存在的目录直接返回成功，于是问题被推迟到
+// 运营上传图片时才暴露 —— 那时排查起来麻烦得多。
+func ensureWritableDir(dir string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	probe := filepath.Join(dir, ".write-probe")
+	f, err := os.OpenFile(probe, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := f.WriteString("ok"); err != nil {
+		f.Close()
+		_ = os.Remove(probe)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(probe)
+		return err
+	}
+	return os.Remove(probe)
+}
+
+// listenAddr 监听地址。
+//
+// 走 cfg.App.Host 而不是直接读 os.Getenv：
+// 后者绕过了 config 的默认值与校验，读不到就硬编码 0.0.0.0，
+// 等于默认把所有网卡都监听上。现在默认 127.0.0.1，
+// 容器场景由 docker-compose 显式设 APP_HOST=0.0.0.0。
 func listenAddr(cfg *config.Config) string {
 	return cfg.App.Host + ":" + itoa(cfg.App.Port)
 }

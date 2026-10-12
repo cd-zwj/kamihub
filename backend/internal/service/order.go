@@ -47,6 +47,8 @@ type OrderService struct {
 	settings   *SettingsService
 	deliveries *DeliveryService
 	routes     *routing.Registry
+	// cards 自有卡密池。自建商品（stock_mode=local）不走上游，直接从这里取卡密。
+	cards *CardService
 }
 
 func NewOrderService(
@@ -57,11 +59,13 @@ func NewOrderService(
 	settings *SettingsService,
 	deliveries *DeliveryService,
 	routes *routing.Registry,
+	cards *CardService,
 ) *OrderService {
 	return &OrderService{
 		db: db, cfg: cfg, cache: c,
 		platforms: platforms, settings: settings,
 		deliveries: deliveries, routes: routes,
+		cards: cards,
 	}
 }
 
@@ -121,6 +125,13 @@ func (s *OrderService) Create(ctx context.Context, in CreateOrderInput) (*models
 	}
 
 	// ---- 构建候选货源 ----
+	// 自建商品（stock_mode=local）没有上游货源，走本地卡密池发货。
+	// 这条分支必须在 buildCandidates 之前分流：否则会直接报「没有可用的货源」，
+	// 而这类商品本来就不该有货源。
+	if goods.IsLocalStock() {
+		return s.createFromCardPool(ctx, &goods, in, quantity)
+	}
+
 	candidates, err := s.buildCandidates(ctx, goods.ID)
 	if err != nil {
 		return nil, err
@@ -338,6 +349,177 @@ func (s *OrderService) Create(ctx context.Context, in CreateOrderInput) (*models
 		"cards", len(purchased.CardCodes()),
 		"delivery_url", s.deliveries.URL(d.Token))
 
+	return order, nil
+}
+
+// createFromCardPool 用商品自带的卡密池本地发货。
+//
+// 与上游采购的区别：
+//   - 没有「阶段一/阶段二」，也没有故障转移 —— 卡密就在自己库里，
+//     要么有要么没有，不存在「换一家试试」
+//   - 没有上游成本，成本是运营自己录的 CostPrice
+//   - 卡密内容直接来自池子，使用说明来自商品的 UsageInstruction
+//
+// 流程刻意做成「先取卡密并提交占用，再写订单」：
+// 反过来（先建订单再取卡密）会出现「订单已存在但没卡密」的中间态，
+// 而取卡密的 SQL 本身是原子的，先占用最坏也只是少卖一条。
+func (s *OrderService) createFromCardPool(
+	ctx context.Context,
+	goods *models.Goods,
+	in CreateOrderInput,
+	quantity int,
+) (*models.Order, error) {
+	// 一次可发多张：每张卡密仍逐条绑定到同一笔订单上，
+	// 归属/退款/作废的追溯粒度不变，只是省掉调用方自己拆单。
+	// 取卡密的过程是「取一张写一张」，中途没货就把前面已取的退回池子，
+	// 绝不出现「收了三张的钱只发两张」这种半成品订单。
+
+	now := time.Now()
+	order := &models.Order{
+		OrderNo:         generateOrderNo(),
+		RequestID:       in.RequestID,
+		GoodsID:         goods.ID,
+		Quantity:        quantity,
+		Status:          models.OrderStatusPurchasing,
+		Remark:          truncateStr(in.Remark, 500),
+		CreatedByUserID: in.UserID,
+	}
+	if snap, err := json.Marshal(goods); err == nil {
+		order.GoodsSnapshot = snap
+	}
+
+	// ---- 先落订单骨架，拿到 ID，才能让卡密绑定到它 ----
+	if err := s.db.WithContext(ctx).Create(order).Error; err != nil {
+		if isDuplicateKey(err) {
+			// request_id 撞了：并发下另一个请求已经建好这单，回放它
+			if existing, ferr := s.findByRequestID(ctx, in.RequestID); ferr == nil && existing != nil {
+				return existing, nil
+			}
+		}
+		return nil, fmt.Errorf("保存订单失败: %w", err)
+	}
+
+	// ---- 原子取卡密（按数量逐张取） ----
+	taken := make([]models.CardStock, 0, quantity)
+	for i := 0; i < quantity; i++ {
+		card, err := s.cards.TakeOne(ctx, goods.ID, order.ID, nil)
+		if err != nil {
+			// 没卡密了：这张订单标失败并说明原因，不留在 purchasing 上悬着。
+			//
+			// 关键：前面已经取到的卡密必须退回池子，否则它们会被永久锁在
+			// 这笔失败的订单上 —— 池子里显示有货、实际发不出去。
+			if len(taken) > 0 {
+				if rerr := s.cards.ReleaseByOrder(ctx, order.ID); rerr != nil {
+					slog.Error("取卡密不足后释放卡密失败，需人工核对",
+						"order_no", order.OrderNo, "released", len(taken), "error", rerr.Error())
+				}
+			}
+			// 文案要给运营可行动的信息：「补货」而不是把驱动错误原样抛出去。
+			msg := "该商品卡密池已无库存，请先在「卡密池」补货后重新下单"
+			if !errors.Is(err, ErrCardEmpty) {
+				msg = "取卡密失败：" + err.Error()
+			}
+			if quantity > 1 {
+				msg = fmt.Sprintf("该商品卡密池库存不足：需要 %d 张，只取到 %d 张，已全部退回卡密池，请补货后重新下单",
+					quantity, len(taken))
+				if !errors.Is(err, ErrCardEmpty) {
+					msg = fmt.Sprintf("取卡密失败（已取到 %d 张，已全部退回）：%s", len(taken), err.Error())
+				}
+			}
+			updates := map[string]any{
+				"status":     models.OrderStatusFailed,
+				"error_msg":  msg,
+				"error_kind": string(platform.KindBusiness),
+				"updated_at": time.Now(),
+			}
+			if uerr := s.db.WithContext(ctx).Model(&models.Order{}).Where("id = ?", order.ID).
+				Updates(updates).Error; uerr != nil {
+				slog.Warn("标记订单失败时出错", "order_no", order.OrderNo, "error", uerr.Error())
+			}
+			order.Status = models.OrderStatusFailed
+			order.ErrorMsg = msg
+			slog.Warn("卡密池发货失败", "order_no", order.OrderNo, "goods", goods.Code, "error", msg)
+			return order, nil
+		}
+		taken = append(taken, *card)
+	}
+
+	// ---- 组装发货内容 ----
+	cards := make([]platform.Card, 0, len(taken))
+	for _, c := range taken {
+		cards = append(cards, platform.Card{Code: c.Code})
+	}
+	raw, merr := json.Marshal(cards)
+	if merr != nil {
+		slog.Warn("序列化卡密失败", "order_no", order.OrderNo, "error", merr.Error())
+	}
+
+	unitPrice := goods.Price
+	total := unitPrice.Mul(decimal.NewFromInt(int64(quantity)))
+	// 提货页的「使用说明」用商品上那份通用说明。
+	// 商品的 CostPrice 只用于内部算毛利，绝不出现在买家能看到的地方。
+	updates := map[string]any{
+		"status":       models.OrderStatusDelivered,
+		"delivered_at": now,
+		"unit_price":   unitPrice,
+		"total_amount": total,
+		"instruction":  goods.UsageInstruction,
+		"error_msg":    "",
+		"error_kind":   "",
+		"attempts":     1,
+	}
+	if merr == nil {
+		updates["cards"] = datatypes.JSON(raw)
+	}
+	if err := s.db.WithContext(ctx).Model(&models.Order{}).Where("id = ?", order.ID).
+		Updates(updates).Error; err != nil {
+		// 订单没写成功，但卡密已经被占用 —— 全部退回去，别让卡密白白锁死。
+		// 这里必须退回：卡密已售但订单没发货，对账时会对不上。
+		// 一次可能取了多张，ReleaseByOrder 按 order_id 整批释放，天然覆盖。
+		if rerr := s.cards.ReleaseByOrder(ctx, order.ID); rerr != nil {
+			slog.Error("订单落库失败后释放卡密也失败，需人工核对",
+				"order_no", order.OrderNo, "card_ids", cardIDsOf(taken), "error", rerr.Error())
+		}
+		return nil, fmt.Errorf("保存订单失败: %w", err)
+	}
+
+	order.Status = models.OrderStatusDelivered
+	order.DeliveredAt = &now
+	order.UnitPrice = unitPrice
+	order.TotalAmount = total
+	order.Instruction = goods.UsageInstruction
+	order.Attempts = 1
+	if merr == nil {
+		order.Cards = datatypes.JSON(raw)
+	}
+
+	// 附加内容模板（与上游订单用同一套渲染逻辑）
+	order.ExtraText = s.renderExtra(ctx, goods, order, &platform.PurchaseResult{
+		UnitPrice:   unitPrice,
+		TotalAmount: total,
+		Cards:       cards,
+		Content:     "",
+		Instruction: goods.UsageInstruction,
+	})
+
+	if errtxt := order.ExtraText; errtxt != "" {
+		if uerr := s.db.WithContext(ctx).Model(&models.Order{}).Where("id = ?", order.ID).
+			Update("extra_text", errtxt).Error; uerr != nil {
+			slog.Warn("写入附加内容失败", "order_no", order.OrderNo, "error", uerr.Error())
+		}
+	}
+
+	slog.Info("卡密池发货成功",
+		"order_no", order.OrderNo, "goods", goods.Code, "cards", len(taken),
+		"card_ids", cardIDsOf(taken))
+
+	// ---- 生成提货链接 ----
+	d, derr := s.deliveries.CreateForOrder(ctx, order, in.TTLHours)
+	if derr != nil {
+		slog.Error("生成提货链接失败", "order_no", order.OrderNo, "error", derr.Error())
+		return order, nil
+	}
+	order.Delivery = d
 	return order, nil
 }
 
@@ -639,6 +821,11 @@ func (s *OrderService) RetryQuery(ctx context.Context, orderID uint) (*models.Or
 	if err := s.db.WithContext(ctx).Preload("Goods").First(&order, orderID).Error; err != nil {
 		return nil, err
 	}
+	// 自有卡密商品没有上游单号，也就无所谓「重新查单」。
+	// 它的失败原因是池子空了，正确动作是补货后重新下单，而不是重查。
+	if order.Goods != nil && order.Goods.IsLocalStock() {
+		return &order, errors.New("该商品由自有卡密池发货，没有上游单号可查；补货后请重新下单")
+	}
 	if order.PlatformID == nil || order.PlatformTradeNo == "" {
 		return nil, errors.New("该订单没有上游单号，无法查单")
 	}
@@ -718,4 +905,229 @@ func isDuplicateKey(err error) bool {
 	return strings.Contains(msg, "duplicate key") ||
 		strings.Contains(msg, "unique constraint") ||
 		strings.Contains(msg, "duplicated key")
+}
+
+// cardIDsOf 把本次发出的卡密 id 拼成日志用的字符串。
+// 一次可能发多张，日志里要能一眼看出到底动了池子里的哪几条。
+func cardIDsOf(cards []models.CardStock) string {
+	ids := make([]string, 0, len(cards))
+	for _, c := range cards {
+		ids = append(ids, fmt.Sprintf("%d", c.ID))
+	}
+	return strings.Join(ids, ",")
+}
+
+// ---- 撤销订单 ----
+
+// 撤销时卡密的去向
+const (
+	// CardActionReturn 退回卡密池，可以再卖。
+	CardActionReturn = "return"
+	// CardActionVoid 作废，不能再卖，但保留记录便于对账。
+	CardActionVoid = "void"
+	// CardActionKeep 什么都不做，卡密仍标记已售。
+	// 用于「只想让提货链接失效，但营收和库存都要保留原样」的场景。
+	CardActionKeep = "keep"
+)
+
+// CancelOptions 撤销订单的入参
+type CancelOptions struct {
+	// Reason 撤销原因，会写进订单备注与审计日志
+	Reason string
+	// CardAction 卡密去向：return / void / keep。留空时按商品的默认配置决定
+	CardAction string
+	// ForceView 买家已查看过提货页时是否仍强行退回。
+	//
+	// 默认 false：卡密明文已经露出去了，退回池子会被卖给第二个人，
+	// 造成同一张卡密发给两个买家。运营要强行退回必须显式传 true，
+	// 并且这件事会写进审计日志，出问题时有据可查。
+	ForceView bool
+	// UserID 操作人，写审计日志用
+	UserID *uint
+}
+
+// CancelResult 撤销结果，供接口回显
+type CancelResult struct {
+	Order      *models.Order
+	CardAction string
+	CardCount  int64
+	ViewCount  int
+	// Warn 需要提醒运营的话（例如「买家已查看过，卡密可能已暴露」）
+	Warn string
+}
+
+// Cancel 撤销一笔已发货的订单。
+//
+// 它一次做完三件事，缺一不可：
+//  1. 决定卡密去向（退回池子 / 作废 / 保持不动）
+//  2. 作废提货链接 —— 否则撤销了买家还能点开看卡密
+//  3. 把订单标记为 cancelled，并清掉 cards 快照
+//
+// 为什么要清 cards：卡密退回池子后会被别人买走，
+// 订单上再留着这段明文，运营对账时会看到「已撤销的订单里还挂着卡密」，
+// 很容易误判成「这张卡密还是这单的」。清掉才是诚实的。
+//
+// 整个方法在一个事务里。撤销是钱和货的事，不能做一半。
+func (s *OrderService) Cancel(ctx context.Context, orderID uint, opts CancelOptions) (*CancelResult, error) {
+	if orderID == 0 {
+		return nil, errors.New("订单 ID 不能为空")
+	}
+
+	var out *CancelResult
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var order models.Order
+		if err := tx.First(&order, orderID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errors.New("订单不存在")
+			}
+			return err
+		}
+		if order.Status == models.OrderStatusCancelled {
+			return errors.New("该订单已经撤销过了")
+		}
+		// 只有发货成功的订单才谈得上撤销（卡密确实发出去了）。
+		// failed / purchasing 的单没有已售卡密，撤销没有意义，也避免误操作。
+		if order.Status != models.OrderStatusDelivered {
+			return fmt.Errorf("只有「已发货」的订单可以撤销，当前状态：%s", order.Status)
+		}
+
+		// 商品可能已被删除，撤销流程不能因此卡死：拿不到就按保守默认走。
+		var goods models.Goods
+		goodsMissing := false
+		if err := tx.Select("id", "return_card_on_cancel").First(&goods, order.GoodsID).Error; err != nil {
+			goodsMissing = true
+		}
+
+		// ---- 决定卡密去向 ----
+		action := strings.TrimSpace(opts.CardAction)
+		if action == "" {
+			action = CardActionVoid // 缺省与商品默认值一致：不退回
+			if !goodsMissing && goods.ReturnCardOnCancel {
+				action = CardActionReturn
+			}
+		}
+		switch action {
+		case CardActionReturn, CardActionVoid, CardActionKeep:
+		default:
+			return fmt.Errorf("卡密去向不合法：%q（只能是 return / void / keep）", action)
+		}
+
+		// ---- 已查看保护 ----
+		var d models.Delivery
+		hasDelivery := false
+		if err := tx.Where("order_id = ?", order.ID).First(&d).Error; err == nil {
+			hasDelivery = true
+		}
+		warn := ""
+		if hasDelivery && d.ViewCount > 0 {
+			warn = fmt.Sprintf("该订单的提货链接已被查看 %d 次，卡密明文可能已经暴露给买家；退回卡密池存在重复发货风险。", d.ViewCount)
+			if action == CardActionReturn && !opts.ForceView {
+				return fmt.Errorf("%s 如确认可以退回，请勾选「已知悉风险，仍退回卡密池」", warn)
+			}
+		}
+
+		// ---- 1) 卡密去向 ----
+		var affected int64
+		switch action {
+		case CardActionReturn:
+			if err := s.cards.ReleaseByOrder(ctx, order.ID); err != nil {
+				return fmt.Errorf("退回卡密失败：%w", err)
+			}
+			affected = int64(len(cardsOf(order)))
+		case CardActionVoid:
+			reason := "撤销订单"
+			if strings.TrimSpace(opts.Reason) != "" {
+				reason = "撤销订单：" + strings.TrimSpace(opts.Reason)
+			}
+			n, err := s.cards.VoidByOrder(ctx, order.ID, reason)
+			if err != nil {
+				return fmt.Errorf("作废卡密失败：%w", err)
+			}
+			affected = n
+		case CardActionKeep:
+			affected = int64(len(cardsOf(order)))
+		}
+
+		// ---- 2) 作废提货链接 ----
+		if hasDelivery && d.RevokedAt == nil {
+			reason := strings.TrimSpace(opts.Reason)
+			if reason == "" {
+				reason = "订单已撤销"
+			}
+			if err := tx.Model(&models.Delivery{}).Where("id = ?", d.ID).
+				Updates(map[string]any{
+					"revoked_at":    time.Now(),
+					"revoked_by":    opts.UserID,
+					"revoke_reason": truncateStr("订单撤销："+reason, 255),
+					"status":        "revoked",
+					"updated_at":    time.Now(),
+				}).Error; err != nil {
+				return fmt.Errorf("作废提货链接失败：%w", err)
+			}
+		}
+
+		// ---- 3) 订单落状态 ----
+		note := "后台撤销订单"
+		switch action {
+		case CardActionReturn:
+			note += "：卡密已退回卡密池"
+		case CardActionVoid:
+			note += "：卡密已作废（未退回）"
+		case CardActionKeep:
+			note += "：卡密保持已售（未退回也未作废）"
+		}
+		note += "、投递链接作废"
+		if r := strings.TrimSpace(opts.Reason); r != "" {
+			note += "；原因：" + r
+		}
+
+		updates := map[string]any{
+			"status":     models.OrderStatusCancelled,
+			"error_msg":  truncateStr(note, 500),
+			"updated_at": time.Now(),
+		}
+		// 卡密已经不在这一单名下了，快照必须清掉，否则对账会误导
+		if action != CardActionKeep {
+			updates["cards"] = nil
+		}
+		if err := tx.Model(&models.Order{}).Where("id = ?", order.ID).
+			Updates(updates).Error; err != nil {
+			return fmt.Errorf("更新订单状态失败：%w", err)
+		}
+
+		order.Status = models.OrderStatusCancelled
+		order.ErrorMsg = note
+		if action != CardActionKeep {
+			order.Cards = nil
+		}
+
+		out = &CancelResult{
+			Order:      &order,
+			CardAction: action,
+			CardCount:  affected,
+			ViewCount:  d.ViewCount,
+			Warn:       warn,
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	slog.Info("订单已撤销",
+		"order_no", out.Order.OrderNo, "card_action", out.CardAction,
+		"cards", out.CardCount, "views", out.ViewCount, "force_view", opts.ForceView)
+	return out, nil
+}
+
+// cardsOf 从订单的 cards 快照里取出卡密列表（只用于计数，不参与业务判断）
+func cardsOf(order models.Order) []platform.Card {
+	if len(order.Cards) == 0 {
+		return nil
+	}
+	var cs []platform.Card
+	if err := json.Unmarshal(order.Cards, &cs); err != nil {
+		return nil
+	}
+	return cs
 }

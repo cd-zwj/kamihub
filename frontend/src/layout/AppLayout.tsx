@@ -2,9 +2,9 @@ import { useState } from 'react';
 import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { Avatar, Dropdown, Form, Input, Layout, Menu, Modal, Tag, message } from 'antd';
 import {
-  ApiOutlined, AppstoreOutlined, DashboardOutlined, FileSearchOutlined,
-  ImportOutlined, KeyOutlined, LinkOutlined, LogoutOutlined, SettingOutlined, ShoppingCartOutlined,
-  TeamOutlined, UserOutlined,
+  ApiOutlined, AppstoreOutlined, BookOutlined, DashboardOutlined, FileSearchOutlined,
+  FileTextOutlined, ImportOutlined, KeyOutlined, LinkOutlined, LogoutOutlined, SettingOutlined,
+  ShoppingCartOutlined, TeamOutlined, ThunderboltOutlined, UserOutlined, WalletOutlined,
 } from '@ant-design/icons';
 import { api } from '@/api/client';
 import { useAuth } from '@/auth/AuthContext';
@@ -20,29 +20,44 @@ export default function AppLayout() {
   const [pwdForm] = Form.useForm();
   const [pwdLoading, setPwdLoading] = useState(false);
 
+  // 后台所有路径都带 /admin 前缀：根路径留给买家商城。
+  // 例外是「接口文档」—— 它是独立布局的公开页，路径就是 /docs。
   const items = [
-    { key: '/', icon: <DashboardOutlined />, label: <Link to="/">概览</Link> },
-    { key: '/orders', icon: <ShoppingCartOutlined />, label: <Link to="/orders">订单</Link> },
-    { key: '/deliveries', icon: <LinkOutlined />, label: <Link to="/deliveries">提货链接</Link> },
-    { key: '/upstream', icon: <ImportOutlined />, label: <Link to="/upstream">上游商品</Link> },
-    { key: '/goods', icon: <AppstoreOutlined />, label: <Link to="/goods">商品与货源</Link> },
-    { key: '/platforms', icon: <ApiOutlined />, label: <Link to="/platforms">平台管理</Link> },
-    { key: '/logs', icon: <FileSearchOutlined />, label: <Link to="/logs">日志</Link> },
+    { key: '/admin', icon: <DashboardOutlined />, label: <Link to="/admin">概览</Link> },
+    { key: '/admin/orders', icon: <ShoppingCartOutlined />, label: <Link to="/admin/orders">订单</Link> },
+    { key: '/admin/deliveries', icon: <LinkOutlined />, label: <Link to="/admin/deliveries">提货链接</Link> },
+    { key: '/admin/upstream', icon: <ImportOutlined />, label: <Link to="/admin/upstream">上游商品</Link> },
+    { key: '/admin/goods', icon: <AppstoreOutlined />, label: <Link to="/admin/goods">商品与货源</Link> },
+    { key: '/admin/platforms', icon: <ApiOutlined />, label: <Link to="/admin/platforms">平台管理</Link> },
+    { key: '/admin/logs', icon: <FileSearchOutlined />, label: <Link to="/admin/logs">日志</Link> },
     ...(isAdmin
       ? [
-          { key: '/users', icon: <TeamOutlined />, label: <Link to="/users">用户</Link> },
-          { key: '/tokens', icon: <KeyOutlined />, label: <Link to="/tokens">访问令牌</Link> },
-          { key: '/settings', icon: <SettingOutlined />, label: <Link to="/settings">系统设置</Link> },
+          { key: '/admin/shop-admin', icon: <WalletOutlined />, label: <Link to="/admin/shop-admin">C 端商城</Link> },
+          { key: '/admin/payment-admin', icon: <ThunderboltOutlined />, label: <Link to="/admin/payment-admin">在线支付</Link> },
+          { key: '/admin/users', icon: <TeamOutlined />, label: <Link to="/admin/users">用户</Link> },
+          { key: '/admin/tokens', icon: <KeyOutlined />, label: <Link to="/admin/tokens">访问令牌</Link> },
+          { key: '/admin/admin-guide', icon: <BookOutlined />, label: <Link to="/admin/admin-guide">使用准则</Link> },
+          {
+            key: '/docs',
+            icon: <FileTextOutlined />,
+            // 开放接口文档是独立布局（没有后台侧边栏），新窗口打开更合适
+            label: (
+              <a href="/docs" target="_blank" rel="noreferrer">
+                接口文档
+              </a>
+            ),
+          },
+          { key: '/admin/settings', icon: <SettingOutlined />, label: <Link to="/admin/settings">系统设置</Link> },
         ]
       : []),
   ];
 
-  // 让 /orders/123 这类子路径也能高亮父菜单
+  // 让 /admin/orders/123 这类子路径也能高亮父菜单
   const selectedKey =
     items
       .map((i) => i.key)
-      .filter((k) => k !== '/' && location.pathname.startsWith(k))
-      .sort((a, b) => b.length - a.length)[0] ?? '/';
+      .filter((k) => k !== '/admin' && location.pathname.startsWith(k))
+      .sort((a, b) => b.length - a.length)[0] ?? '/admin';
 
   async function submitPassword() {
     try {
@@ -53,7 +68,7 @@ export default function AppLayout() {
       setPwdOpen(false);
       pwdForm.resetFields();
       await logout();
-      navigate('/login');
+      navigate('/admin/login');
     } catch (err) {
       if (err instanceof Error) message.error(err.message);
     } finally {
@@ -96,7 +111,7 @@ export default function AppLayout() {
                   label: '退出登录',
                   onClick: async () => {
                     await logout();
-                    navigate('/login');
+                    navigate('/admin/login');
                   },
                 },
               ],

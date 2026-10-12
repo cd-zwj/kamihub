@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -18,12 +19,15 @@ import (
 type GoodsService struct {
 	db        *gorm.DB
 	platforms *PlatformService
+	// cards 卡密池。自建商品（stock_mode=local）靠它发货，
+	// 同时给商品列表/详情填 card_total / card_available 两个统计值。
+	cards *CardService
 	// verifySupply 开启后，建/改货源时会向上游校验商品并预填缓存
 	verifySupply bool
 }
 
-func NewGoodsService(db *gorm.DB, platforms *PlatformService, verifySupply bool) *GoodsService {
-	return &GoodsService{db: db, platforms: platforms, verifySupply: verifySupply}
+func NewGoodsService(db *gorm.DB, platforms *PlatformService, cards *CardService, verifySupply bool) *GoodsService {
+	return &GoodsService{db: db, platforms: platforms, cards: cards, verifySupply: verifySupply}
 }
 
 // GoodsFilter 列表筛选
@@ -57,7 +61,40 @@ func (s *GoodsService) List(ctx context.Context, f GoodsFilter) ([]models.Goods,
 		Order("id DESC").
 		Offset((page - 1) * size).Limit(size).
 		Find(&out).Error
-	return out, total, err
+	if err != nil {
+		return nil, 0, err
+	}
+	s.fillCardStats(ctx, out)
+	return out, total, nil
+}
+
+// fillCardStats 给商品填上卡密池统计值。
+//
+// 单独一次聚合查询搞定整页商品，避免每行一个 COUNT（列表 20 行就是 20 次查询）。
+func (s *GoodsService) fillCardStats(ctx context.Context, list []models.Goods) {
+	if s.cards == nil || len(list) == 0 {
+		return
+	}
+	ids := make([]uint, 0, len(list))
+	for i := range list {
+		if list[i].IsLocalStock() {
+			ids = append(ids, list[i].ID)
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	stats, err := s.cards.StatsBatch(ctx, ids)
+	if err != nil {
+		// 统计失败不该让商品列表打不开，日志里留痕即可
+		slog.Warn("统计卡密池失败", "error", err.Error())
+		return
+	}
+	for i := range list {
+		st := stats[list[i].ID]
+		list[i].CardTotal = st.Total
+		list[i].CardAvailable = st.Available
+	}
 }
 
 // Get 取单个商品（含货源）
@@ -69,6 +106,10 @@ func (s *GoodsService) Get(ctx context.Context, id uint) (*models.Goods, error) 
 	if err != nil {
 		return nil, err
 	}
+	one := []models.Goods{g}
+	s.fillCardStats(ctx, one)
+	g.CardTotal = one[0].CardTotal
+	g.CardAvailable = one[0].CardAvailable
 	return &g, nil
 }
 
@@ -89,6 +130,24 @@ type GoodsInput struct {
 	// MaxSupplyPrice 最高供应价（每笔应付总额上限，含手续费）。0 或负数表示不限制。
 	MaxSupplyPrice *decimal.Decimal `json:"max_supply_price"`
 	ExtraTemplate  string           `json:"extra_template"`
+
+	// ---------- 自建商品（卡密池）相关 ----------
+
+	// StockMode 供货方式：1=上游采购（默认）2=自带卡密池。
+	StockMode *int `json:"stock_mode"`
+	// CostPrice 自建商品的单条成本价
+	CostPrice *decimal.Decimal `json:"cost_price"`
+	// UsageInstruction 自建商品的通用使用说明（买家在提货页看到的使用方式）
+	UsageInstruction *string `json:"usage_instruction"`
+	// InitCards 建商品时顺手把卡密一起导入（每行一条）。
+	// 新建商品后必然要贴卡密，分两步会让运营以为「建完就能卖」。
+	InitCards string `json:"init_cards"`
+	// ReturnCardOnCancel 撤销订单时是否默认把卡密退回卡密池。
+	//
+	// 用指针是为了区分「没传」和「传了 false」：
+	// 前端编辑页每次都会带上这个字段，但其它调用方（脚本、旧前端）
+	// 可能不带，那时必须保持原值不动，不能被零值覆盖成 false。
+	ReturnCardOnCancel *bool `json:"return_card_on_cancel"`
 }
 
 func (in *GoodsInput) validate() error {
@@ -140,6 +199,7 @@ func (s *GoodsService) Create(ctx context.Context, in GoodsInput) (*models.Goods
 		MaxAttempts:     3,
 		MaxQuantity:     1,
 		ExtraTemplate:   in.ExtraTemplate,
+		StockMode:       models.StockModeUpstream,
 	}
 	if in.Status != nil {
 		g.Status = *in.Status
@@ -162,6 +222,13 @@ func (s *GoodsService) Create(ctx context.Context, in GoodsInput) (*models.Goods
 	if in.MaxSupplyPrice != nil && in.MaxSupplyPrice.IsPositive() {
 		g.MaxSupplyPrice = *in.MaxSupplyPrice
 	}
+	if err := applySelfHostedFields(&g, in); err != nil {
+		return nil, err
+	}
+	// 撤销订单时卡密的默认去向。不传就是 false —— 保守默认，不退回。
+	if in.ReturnCardOnCancel != nil {
+		g.ReturnCardOnCancel = *in.ReturnCardOnCancel
+	}
 
 	if err := s.db.WithContext(ctx).Create(&g).Error; err != nil {
 		if isDuplicateKey(err) {
@@ -169,7 +236,63 @@ func (s *GoodsService) Create(ctx context.Context, in GoodsInput) (*models.Goods
 		}
 		return nil, err
 	}
+
+	// 建商品时顺手导入卡密。导入失败不回滚商品 ——
+	// 商品已经建好了，卡密可以在卡密池里重贴一次，为此丢掉整个商品更糟。
+	cards := ParseCards(in.InitCards)
+	if g.IsLocalStock() && len(cards) > 0 {
+		res, ierr := s.cards.Import(ctx, ImportInput{
+			GoodsID:   g.ID,
+			Cards:     cards,
+			CostPrice: g.CostPrice.InexactFloat64(),
+			Remark:    "建商品时导入",
+		})
+		if ierr != nil {
+			slog.Warn("建商品时导入卡密失败，商品已创建", "goods_id", g.ID, "error", ierr.Error())
+			cards = nil
+		} else {
+			slog.Info("建商品时导入卡密",
+				"goods_id", g.ID, "added", res.Added,
+				"duplicate", res.Duplicate, "invalid", res.Invalid)
+		}
+	} else {
+		cards = nil
+	}
+
+	// Create 已经把 goods 落库，这里直接返回它即可 ——
+	// 不要再调 s.Get()：那会再查一次商品、再加一次卡密统计聚合，
+	// 而 Create 的返回值只有 handler 用来回 id/name 给前端，
+	// 多这两次查询纯属浪费（前端拿到商品后本来就要单独查卡密池）。
+	if g.IsLocalStock() {
+		g.CardTotal = int64(len(cards))
+		g.CardAvailable = g.CardTotal
+	}
 	return &g, nil
+}
+
+// applySelfHostedFields 处理「自建商品」的字段。
+//
+// 单独抽出来是因为 Create 与 Update 都要用，且都要做同样的校验：
+// 自建商品必须有使用说明 —— 买家拿到卡密却不知道怎么用，
+// 是这类商品最常见的投诉来源。
+func applySelfHostedFields(g *models.Goods, in GoodsInput) error {
+	if in.StockMode != nil {
+		mode := *in.StockMode
+		if mode != models.StockModeUpstream && mode != models.StockModeLocal {
+			return errors.New("供货方式只能是 1(上游采购) 或 2(自有卡密)")
+		}
+		g.StockMode = mode
+	}
+	if in.CostPrice != nil {
+		if in.CostPrice.IsNegative() {
+			return errors.New("成本价不能为负数")
+		}
+		g.CostPrice = *in.CostPrice
+	}
+	if in.UsageInstruction != nil {
+		g.UsageInstruction = strings.TrimSpace(*in.UsageInstruction)
+	}
+	return nil
 }
 
 func (s *GoodsService) Update(ctx context.Context, id uint, in GoodsInput) (*models.Goods, error) {
@@ -220,8 +343,59 @@ func (s *GoodsService) Update(ctx context.Context, id uint, in GoodsInput) (*mod
 	}
 	updates["extra_template"] = in.ExtraTemplate
 
+	// 撤销订单时卡密的默认去向。只在请求显式带了该字段时才改，
+	// 避免旧的对接方（不带这个字段）把已有配置刷回 false。
+	if in.ReturnCardOnCancel != nil {
+		updates["return_card_on_cancel"] = *in.ReturnCardOnCancel
+	}
+
+	// 自建商品字段。用「非 nil 就写」的语义，让运营能把成本价/说明改回空。
+	if in.StockMode != nil || in.CostPrice != nil || in.UsageInstruction != nil {
+		// 复用 applySelfHostedFields 做校验，避免 Create/Update 两处规则不一致
+		probe := g
+		if err := applySelfHostedFields(&probe, in); err != nil {
+			return nil, err
+		}
+		if in.StockMode != nil {
+			updates["stock_mode"] = probe.StockMode
+		}
+		if in.CostPrice != nil {
+			updates["cost_price"] = probe.CostPrice
+		}
+		if in.UsageInstruction != nil {
+			updates["usage_instruction"] = probe.UsageInstruction
+		}
+	}
+
 	if err := s.db.WithContext(ctx).Model(&models.Goods{}).Where("id = ?", id).Updates(updates).Error; err != nil {
 		return nil, err
+	}
+
+	// 编辑商品时也可以顺手补卡密（补货最常见的动作就是「改一下商品」）
+	if strings.TrimSpace(in.InitCards) != "" {
+		mode := g.StockMode
+		if in.StockMode != nil {
+			mode = *in.StockMode
+		}
+		if mode == models.StockModeLocal {
+			cost := g.CostPrice.InexactFloat64()
+			if in.CostPrice != nil {
+				cost = in.CostPrice.InexactFloat64()
+			}
+			res, ierr := s.cards.Import(ctx, ImportInput{
+				GoodsID:   id,
+				Cards:     ParseCards(in.InitCards),
+				CostPrice: cost,
+				Remark:    "编辑商品时导入",
+			})
+			if ierr != nil {
+				slog.Warn("编辑商品时导入卡密失败", "goods_id", id, "error", ierr.Error())
+			} else {
+				slog.Info("编辑商品时导入卡密",
+					"goods_id", id, "added", res.Added,
+					"duplicate", res.Duplicate, "invalid", res.Invalid)
+			}
+		}
 	}
 	return s.Get(ctx, id)
 }
@@ -238,6 +412,13 @@ func (s *GoodsService) Delete(ctx context.Context, id uint) error {
 
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Where("goods_id = ?", id).Delete(&models.Supply{}).Error; err != nil {
+			return err
+		}
+		// 没有订单的商品，其卡密池也一并清掉。
+		// 已售出的卡密不在这里删 —— 但既然订单数为 0，池子里不可能有已售卡密；
+		// 仍然显式排除已售状态，避免以后改判定条件时误删发货凭据。
+		if err := tx.Where("goods_id = ? AND status <> ?", id, models.CardStatusSold).
+			Delete(&models.CardStock{}).Error; err != nil {
 			return err
 		}
 		return tx.Delete(&models.Goods{}, id).Error

@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
-  Alert, Button, Card, Descriptions, Drawer, Form, Input, InputNumber, Modal, Select,
+  Alert, Button, Card, Checkbox, Descriptions, Drawer, Form, Input, InputNumber, Modal, Radio, Select,
   Space, Table, Tag, Timeline, Tooltip, Typography, message,
 } from 'antd';
-import { CopyOutlined, LinkOutlined, PlusOutlined, ReloadOutlined, SyncOutlined } from '@ant-design/icons';
+import { CopyOutlined, LinkOutlined, PlusOutlined, ReloadOutlined, RollbackOutlined, SyncOutlined } from '@ant-design/icons';
 import { api, toastError } from '@/api/client';
 import {
   FAIL_KIND_TEXT, ORDER_STATUS_COLOR, ORDER_STATUS_TEXT,
@@ -26,6 +26,16 @@ export default function Orders() {
 
   // 详情
   const [detail, setDetail] = useState<{ order: Order; cards: string[]; delivery_url: string } | null>(null);
+
+  // 撤销订单
+  const [cancelTarget, setCancelTarget] = useState<Order | null>(null);
+  const [cancelAction, setCancelAction] = useState<'return' | 'void' | 'keep'>('void');
+  const [cancelReason, setCancelReason] = useState('');
+  const [cancelForceView, setCancelForceView] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+  // 撤销时商品的默认去向，打开弹窗时拉一次
+  const [cancelDefault, setCancelDefault] = useState<'return' | 'void'>('void');
+  const [cancelViews, setCancelViews] = useState(0);
   const [attempts, setAttempts] = useState<OrderAttempt[]>([]);
   const [detailLoading, setDetailLoading] = useState(false);
 
@@ -80,6 +90,67 @@ export default function Orders() {
       await load();
     } catch (e) {
       toastError(e);
+    }
+  }
+
+  /**
+   * 打开撤销弹窗。
+   *
+   * 两件事必须在这里拿到，否则弹窗里的选项和警告都是错的：
+   *  1. 商品上配的默认卡密去向（return_card_on_cancel）
+   *  2. 这笔订单的提货链接被看过几次 —— 看过就意味着卡密明文
+   *     可能已经落到买家手里，退回池子会有重复发货风险，要提前警告
+   */
+  async function openCancel(order: Order) {
+    setCancelTarget(order);
+    setCancelReason('');
+    setCancelForceView(false);
+    setCancelViews(0);
+    let action: 'return' | 'void' = 'void';
+    try {
+      const g = await api.goods(order.goods_id);
+      action = g.return_card_on_cancel ? 'return' : 'void';
+      setCancelDefault(action);
+    } catch {
+      setCancelDefault('void');
+    }
+    setCancelAction(action);
+    // 顺手取一下查看次数，用于弹窗里的风险提示
+    try {
+      const d = await api.order(order.id);
+      const dv = (d.order.delivery as { view_count?: number } | null | undefined)?.view_count ?? 0;
+      setCancelViews(dv);
+      if (dv > 0) setCancelForceView(false);
+    } catch {
+      /* 取不到就不显示警告，不阻塞撤销 */
+    }
+  }
+
+  async function submitCancel() {
+    if (!cancelTarget) return;
+    setCancelling(true);
+    try {
+      const res = await api.cancelOrder(cancelTarget.id, {
+        reason: cancelReason,
+        card_action: cancelAction,
+        force_view: cancelForceView,
+      });
+      const label =
+        res.card_action === 'return'
+          ? `${res.card_count} 张卡密已退回卡密池`
+          : res.card_action === 'void'
+            ? `${res.card_count} 张卡密已作废`
+            : '卡密保持已售，未做变动';
+      message.success(`订单已撤销，${label}`);
+      setCancelTarget(null);
+      await load();
+      if (detail?.order.id === cancelTarget.id) {
+        await openDetail(cancelTarget.id);
+      }
+    } catch (e) {
+      toastError(e);
+    } finally {
+      setCancelling(false);
     }
   }
 
@@ -380,11 +451,23 @@ export default function Orders() {
               size="small"
               title="货源尝试过程"
               extra={
-                detail.order.status !== 'delivered' && (
-                  <Button size="small" icon={<SyncOutlined />} onClick={() => void retry(detail.order.id)}>
-                    重新查单
-                  </Button>
-                )
+                <Space>
+                  {detail.order.status === 'delivered' && isAdmin && (
+                    <Button
+                      size="small"
+                      danger
+                      icon={<RollbackOutlined />}
+                      onClick={() => void openCancel(detail.order)}
+                    >
+                      撤销订单
+                    </Button>
+                  )}
+                  {detail.order.status !== 'delivered' && (
+                    <Button size="small" icon={<SyncOutlined />} onClick={() => void retry(detail.order.id)}>
+                      重新查单
+                    </Button>
+                  )}
+                </Space>
               }
             >
               {attempts.length === 0 ? (
@@ -415,6 +498,85 @@ export default function Orders() {
           </>
         )}
       </Drawer>
+
+      {/* ---------------- 撤销订单 ---------------- */}
+      <Modal
+        open={!!cancelTarget}
+        title={cancelTarget ? `撤销订单 · ${cancelTarget.order_no}` : '撤销订单'}
+        okText="确认撤销"
+        cancelText="取消"
+        okButtonProps={{ danger: true, loading: cancelling }}
+        onOk={() => void submitCancel()}
+        onCancel={() => setCancelTarget(null)}
+        width={560}
+        destroyOnClose
+      >
+        <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+          <Alert
+            type="warning"
+            showIcon
+            message="撤销会同时作废提货链接"
+            description="撤销后买家将无法再打开该提货页，订单状态变为「已撤销」。此操作不可自动撤销，请确认后再执行。"
+          />
+
+          {cancelViews > 0 && (
+            <Alert
+              type="error"
+              showIcon
+              message={`该提货链接已被查看 ${cancelViews} 次`}
+              description="卡密明文可能已经暴露给买家。此时把卡密退回卡密池，它会被卖给下一个买家，存在「同一张卡密发给两个人」的风险。建议选择「作废卡密」。"
+            />
+          )}
+
+          <div>
+            <div style={{ marginBottom: 8, fontWeight: 500 }}>卡密去向</div>
+            <Radio.Group
+              value={cancelAction}
+              onChange={(e) => setCancelAction(e.target.value)}
+              style={{ display: 'flex', flexDirection: 'column', gap: 10 }}
+            >
+              <Radio value="return" disabled={cancelViews > 0 && !cancelForceView}>
+                <b>退回卡密池</b>
+                <Typography.Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>
+                  卡密重新变为「可售」，可以再卖给别人
+                </Typography.Text>
+              </Radio>
+              <Radio value="void">
+                <b>作废卡密</b>
+                <Typography.Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>
+                  卡密不再可售，但保留记录便于对账{cancelDefault === 'void' ? '（本商品默认）' : ''}
+                </Typography.Text>
+              </Radio>
+              <Radio value="keep">
+                <b>都不动</b>
+                <Typography.Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>
+                  只作废链接，卡密仍标记已售，营收统计保持不变
+                </Typography.Text>
+              </Radio>
+            </Radio.Group>
+          </div>
+
+          {cancelViews > 0 && (
+            <Checkbox checked={cancelForceView} onChange={(e) => setCancelForceView(e.target.checked)}>
+              <Typography.Text type="danger">
+                已知悉重复发货风险，仍要把卡密退回卡密池
+              </Typography.Text>
+            </Checkbox>
+          )}
+
+          <div>
+            <div style={{ marginBottom: 8, fontWeight: 500 }}>撤销原因（会记入审计日志）</div>
+            <Input.TextArea
+              value={cancelReason}
+              onChange={(e) => setCancelReason(e.target.value)}
+              placeholder="例如：客户不要了 / 卡密有问题 / 重复下单"
+              autoSize={{ minRows: 2, maxRows: 4 }}
+              maxLength={200}
+              showCount
+            />
+          </div>
+        </Space>
+      </Modal>
 
       {/* ---------------- 手工下单 ---------------- */}
       <Modal

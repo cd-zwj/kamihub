@@ -1,8 +1,8 @@
 import axios, { AxiosError } from 'axios';
 import { message } from 'antd';
 import type {
-  AdapterMeta, AllSettings, AuditLog, CallLog, DashboardStats, Delivery, DeliveryView,
-  Envelope, Goods, Order, OrderAttempt, PageResult, Platform, StrategyMeta, Supply, User,
+  AdapterMeta, AllSettings, AuditLog, CallLog, CardListResult, CardStats, DashboardStats, Delivery,
+  DeliveryView, Envelope, Goods, Order, OrderAttempt, PageResult, Platform, StrategyMeta, Supply, User,
 } from './types';
 
 const TOKEN_KEY = 'kamihub_token';
@@ -140,6 +140,37 @@ export const api = {
   // 重新从上游抓取该货源的使用说明原文
   fetchSupplyInstruction: (id: number) => unwrap<Supply>(http.post(`/supplies/${id}/fetch-instruction`)),
 
+  // ---------- 自有卡密池（自建商品） ----------
+  // 列表默认返回打码后的卡密；要明文必须传 reveal=1，
+  // 后端会把「查看了明文」这个动作写进审计日志。
+  goodsCards: (id: number, q: ListQuery = {}) =>
+    unwrap<CardListResult>(http.get(`/goods/${id}/cards`, { params: q })),
+  goodsCardStats: (id: number) => unwrap<CardStats>(http.get(`/goods/${id}/card-stats`)),
+  // cards 既可传「一行一条」的整段文本，也可传字符串数组
+  importCards: (
+    id: number,
+    body: { cards: string | string[]; cost_price?: number; remark?: string; batch_no?: string },
+  ) =>
+    unwrap<{
+      batch_no: string;
+      added: number;
+      duplicate: number;
+      invalid: number;
+      available: number;
+      // 超长被拒的条数与其预览。以前超长只计进 invalid，
+      // 长链接卡密被吃掉时界面上查不出原因。
+      too_long?: number;
+      rejected?: string[];
+    }>(http.post(`/goods/${id}/cards`, body)),
+  voidCard: (id: number, reason: string) =>
+    unwrap<{ message: string }>(http.post(`/cards/${id}/void`, { reason })),
+  restoreCard: (id: number) => unwrap<{ message: string }>(http.post(`/cards/${id}/restore`)),
+  deleteCard: (id: number) => unwrap<{ message: string }>(http.delete(`/cards/${id}`)),
+  deleteCardBatch: (goodsId: number, batch_no: string) =>
+    unwrap<{ message: string; deleted: number }>(
+      http.post(`/goods/${goodsId}/cards/delete-batch`, { batch_no }),
+    ),
+
   // ---------- 订单 ----------
   orders: (q: ListQuery = {}) => unwrap<PageResult<Order>>(http.get('/orders', { params: q })),
   order: (id: number) =>
@@ -147,7 +178,27 @@ export const api = {
   orderAttempts: (id: number) => unwrap<{ list: OrderAttempt[] }>(http.get(`/orders/${id}/attempts`)),
   retryOrder: (id: number) =>
     unwrap<{ order: Order; delivery_url: string; cards: string[] }>(http.post(`/orders/${id}/retry`)),
-  purchase: (body: { request_id: string; goods_code: string; quantity?: number; remark?: string; ttl_hours?: number }) =>
+  /**
+   * 撤销订单：决定卡密去向 + 作废提货链接 + 订单转 cancelled。
+   *
+   * card_action：
+   *   return —— 退回卡密池，可以再卖
+   *   void   —— 作废，不能再卖（默认）
+   *   keep   —— 都不动，卡密仍标记已售（只让链接失效，保留营收）
+   * 留空则由商品的 return_card_on_cancel 决定。
+   */
+  cancelOrder: (
+    id: number,
+    body: { reason?: string; card_action?: 'return' | 'void' | 'keep'; force_view?: boolean },
+  ) =>
+    unwrap<{
+      order: Order;
+      card_action: string;
+      card_count: number;
+      view_count: number;
+      warn: string;
+    }>(http.post(`/orders/${id}/cancel`, body)),
+  purchase: (body: { request_id: string; goods_code: string; quantity?: number; remark?: string; ttl_hours?: number; response_mode?: string }) =>
     unwrap<{ order: Order; cards: string[]; delivery_url: string; delivery_token: string }>(
       http.post('/orders/purchase', body),
     ),

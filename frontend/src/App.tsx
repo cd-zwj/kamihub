@@ -1,58 +1,42 @@
-import { Navigate, Route, Routes } from 'react-router-dom';
-import { Spin } from 'antd';
-import { useAuth } from '@/auth/AuthContext';
-import AppLayout from '@/layout/AppLayout';
-import Login from '@/pages/Login';
-import Dashboard from '@/pages/Dashboard';
-import Platforms from '@/pages/Platforms';
-import UpstreamGoods from '@/pages/UpstreamGoods';
-import Goods from '@/pages/Goods';
-import Orders from '@/pages/Orders';
-import Deliveries from '@/pages/Deliveries';
-import Users from '@/pages/Users';
-import Settings from '@/pages/Settings';
-import Tokens from '@/pages/Tokens';
-import Logs from '@/pages/Logs';
+import { useLocation } from 'react-router-dom';
+import ShopApp from '@/shop/ShopApp';
+import ApiDocs from '@/docs/ApiDocs';
+import AdminApp from '@/admin/AdminApp';
 
-function FullScreenSpin() {
-  return (
-    <div style={{ height: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-      <Spin size="large" tip="加载中…" />
-    </div>
-  );
-}
-
+/**
+ * 顶层分流。
+ *
+ * 路径规划（2026-10 调整）：
+ *
+ *	/            买家商城（面向公众，占根路径）
+ *	/login       买家登录/注册
+ *	/orders      买家订单
+ *	/wallet      买家钱包
+ *	/listings/:id 商品详情
+ *	/admin/*     管理后台（内部工具，挪到子路径）
+ *	/docs        开放接口文档（免登录，给对接方）
+ *	/d/:token    提货页（后端服务端渲染，不走这个 SPA）
+ *
+ * 为什么把商城放根路径：ai.ezapi.site 是要发给买家的地址，
+ * 打开就该看到商品，而不是一个要求登录的后台。
+ *
+ * 三套界面各有独立的鉴权上下文，互不影响：
+ * 同一个浏览器可以同时登录后台和买家账号。
+ */
 export default function App() {
-  const { user, loading, isAdmin } = useAuth();
+  const { pathname } = useLocation();
 
-  if (loading) return <FullScreenSpin />;
-
-  if (!user) {
-    return (
-      <Routes>
-        <Route path="/login" element={<Login />} />
-        <Route path="*" element={<Navigate to="/login" replace />} />
-      </Routes>
-    );
+  // 管理后台
+  if (pathname === '/admin' || pathname.startsWith('/admin/')) {
+    return <AdminApp />;
   }
 
-  return (
-    <Routes>
-      <Route path="/login" element={<Navigate to="/" replace />} />
-      <Route element={<AppLayout />}>
-        <Route path="/" element={<Dashboard />} />
-        <Route path="/orders" element={<Orders />} />
-        <Route path="/deliveries" element={<Deliveries />} />
-        <Route path="/upstream" element={<UpstreamGoods />} />
-        <Route path="/goods" element={<Goods />} />
-        <Route path="/platforms" element={<Platforms />} />
-        <Route path="/logs" element={<Logs />} />
-        {/* 仅管理员可见的路由，非管理员直接弹回首页 */}
-        {isAdmin && <Route path="/users" element={<Users />} />}
-        {isAdmin && <Route path="/tokens" element={<Tokens />} />}
-        {isAdmin && <Route path="/settings" element={<Settings />} />}
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Route>
-    </Routes>
-  );
+  // 开放接口文档：给对接方看的，必须免登录
+  if (pathname === '/docs' || pathname.startsWith('/docs/')) {
+    return <ApiDocs />;
+  }
+
+  // 其余全部交给买家商城。
+  // 商城内部自带 /shop → 新路径的重定向，兼容已分享出去的旧链接。
+  return <ShopApp />;
 }

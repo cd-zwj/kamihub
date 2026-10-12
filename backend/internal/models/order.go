@@ -14,13 +14,14 @@ const (
 	OrderStatusDelivered  = "delivered"  // 采购成功、已发货
 	OrderStatusFailed     = "failed"     // 全部货源都失败
 	OrderStatusClosed     = "closed"     // 人工关闭
+	OrderStatusCancelled  = "cancelled"  // 已撤销（卡密可能已退回卡密池）
 	OrderStatusRefunded   = "refunded"   // 已退款
 )
 
 // AllOrderStatuses 供前端筛选使用
 var AllOrderStatuses = []string{
 	OrderStatusPending, OrderStatusPurchasing, OrderStatusDelivered,
-	OrderStatusFailed, OrderStatusClosed, OrderStatusRefunded,
+	OrderStatusFailed, OrderStatusClosed, OrderStatusCancelled, OrderStatusRefunded,
 }
 
 // 失败类型，决定是否可以换货源重试
@@ -74,6 +75,21 @@ type Order struct {
 
 	CreatedByUserID *uint `json:"created_by_user_id"`
 
+	// ---------- C 端下单（买家自助购买）----------
+	//
+	// 以下字段全部可空或带默认值，保证 AutoMigrate 不改动历史订单：
+	// 老订单 BuyerID 为 NULL，语义就是「后台代客下单」。
+	//
+	// BuyerID 指向 buyers 表，与 CreatedByUserID（指向 users 表）是两套体系，
+	// 不要混用：代客下单时两者可能同时有值。
+	BuyerID *uint `gorm:"index" json:"buyer_id"`
+	// ListingID 下单时使用的 C 端上架条目，用于回溯当时的价格与文案
+	ListingID *uint `gorm:"index" json:"listing_id"`
+	// PaidAmount 买家实付金额（余额扣款额），与 TotalAmount（成本口径）分开记
+	PaidAmount decimal.Decimal `gorm:"type:numeric(12,2);not null;default:0" json:"paid_amount"`
+	// Channel 下单渠道：admin=后台代客，web=买家自助
+	Channel string `gorm:"size:16;not null;default:admin;index" json:"channel"`
+
 	CreatedAt   time.Time  `json:"created_at"`
 	UpdatedAt   time.Time  `json:"updated_at"`
 	DeliveredAt *time.Time `json:"delivered_at"`
@@ -81,6 +97,7 @@ type Order struct {
 	Goods    *Goods    `gorm:"foreignKey:GoodsID" json:"goods,omitempty"`
 	Platform *Platform `gorm:"foreignKey:PlatformID" json:"platform,omitempty"`
 	Delivery *Delivery `gorm:"foreignKey:OrderID" json:"delivery,omitempty"`
+	Buyer    *Buyer    `gorm:"foreignKey:BuyerID" json:"buyer,omitempty"`
 }
 
 func (Order) TableName() string { return "orders" }

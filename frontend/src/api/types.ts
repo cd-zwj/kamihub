@@ -115,9 +115,61 @@ export interface Goods {
   /** 最高供应价：单笔应付总额上限（含手续费）。0 = 不限制 */
   max_supply_price: string | number;
   extra_template: string;
+  /** 供货方式：1=向上游平台采购 2=用商品自带的卡密池本地发货 */
+  stock_mode: number;
+  /** 自建商品的单条成本价（仅用于算毛利，不会展示给买家） */
+  cost_price: string | number;
+  /** 自建商品的通用使用说明（买家在提货页看到的「使用方式」） */
+  usage_instruction: string;
+  /**
+   * 撤销订单时，卡密是否默认退回卡密池。
+   *
+   * 默认 false（不退回）。卡密一旦被买家查看过，退回池子就会被二次卖出，
+   * 所以保守起见默认按「作废」处理，要退回必须在这里显式打开。
+   * 这只是默认值，撤销订单的弹窗里还能逐单覆盖。
+   */
+  return_card_on_cancel: boolean;
+  /** 卡密池统计；仅自建商品有意义 */
+  card_total?: number;
+  card_available?: number;
   supplies?: Supply[];
   created_at: string;
   updated_at: string;
+}
+
+/** 卡密池条目 */
+export interface CardStock {
+  id: number;
+  goods_id: number;
+  /** 打码后的卡密；reveal=1 时是明文 */
+  code: string;
+  code_masked: boolean;
+  status: number;
+  status_text: string;
+  order_id?: number | null;
+  sold_at?: string | null;
+  batch_no: string;
+  remark: string;
+  void_reason: string;
+  cost_price: string | number;
+  created_at: string;
+}
+
+export interface CardStats {
+  total: number;
+  available: number;
+  sold: number;
+  void: number;
+}
+
+/** 卡密列表响应（带统计与打码标记） */
+export interface CardListResult {
+  list: CardStock[];
+  total: number;
+  page: number;
+  page_size: number;
+  stats: CardStats;
+  revealed: boolean;
 }
 
 export interface OrderAttempt {
@@ -325,6 +377,15 @@ export const DELIVERY_MODE_TEXT: Record<number, string> = {
   1: '卡密',
   2: '内容',
   3: '人工发货',
+};
+
+/**
+ * 供货方式的中文名。
+ * 1 = 原来那套「向上游平台采购」，2 = 新增的「自有卡密池」。
+ */
+export const STOCK_MODE_TEXT: Record<number, string> = {
+  1: '上游采购',
+  2: '自有卡密',
 };
 
 /**

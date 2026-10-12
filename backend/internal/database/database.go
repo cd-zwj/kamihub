@@ -66,6 +66,9 @@ func Migrate(db *gorm.DB) error {
 		&models.Platform{},
 		&models.Goods{},
 		&models.Supply{},
+		// 自建商品的卡密池。AutoMigrate 只加表/加列，不动已有数据，
+		// 老的「上游商品」不受影响（stock_mode 由列默认值补成 1）。
+		&models.CardStock{},
 		&models.Order{},
 		&models.OrderAttempt{},
 		&models.Delivery{},
@@ -73,6 +76,17 @@ func Migrate(db *gorm.DB) error {
 		&models.Setting{},
 		&models.AuditLog{},
 		&models.PlatformCallLog{},
+
+		// ---------- C 端购买平台 ----------
+		// 同样是纯新增：buyers / listings / wallet_transactions / recharge_codes
+		// 都是新表；orders 上新增的 buyer_id / listing_id / paid_amount / channel
+		// 均为可空或带默认值，历史订单不会被修改。
+		&models.Buyer{},
+		&models.Listing{},
+		&models.WalletTransaction{},
+		&models.RechargeCode{},
+		// 第三方支付（易支付）订单，同样是纯新增表
+		&models.PaymentOrder{},
 	)
 }
 
