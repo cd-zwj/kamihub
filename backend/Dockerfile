@@ -9,7 +9,8 @@ WORKDIR /src
 COPY go.mod go.sum ./
 
 # 模块代理。默认走官方源，保证海外构建与 GitHub Actions 正常；
-# 国内网络构建时用 --build-arg GOPROXY=https://goproxy.cn,direct 覆盖。
+# 国内网络构建时用 --build-arg GOPROXY=https://goproxy.cn,direct 覆盖
+# （docker-compose.yml 已透出该参数，在 .env 里设 GOPROXY 即可）。
 ARG GOPROXY=https://proxy.golang.org,direct
 RUN go env -w GOPROXY=$GOPROXY && \
     go mod download
@@ -35,7 +36,14 @@ WORKDIR /app
 
 COPY --from=build /out/kamihub /app/kamihub
 
-RUN mkdir -p /app/data && chown -R app:app /app
+# 上传目录必须在这里就建好并 chown 给 app。
+#
+# 原因：docker-compose 会把一个命名卷挂到 /app/data/uploads。
+# 如果镜像里没有这个目录，Docker 会以 root:root 新建它，
+# 而进程是以非 root 的 app 用户跑的 —— 结果是上传时报
+# 「保存文件失败」，而且要到运营真正传图时才会暴露。
+# 镜像里预先存在该目录时，Docker 会把目录的所有者一并复制进空卷。
+RUN mkdir -p /app/data/uploads && chown -R app:app /app
 USER app
 
 ENV APP_ENV=production \

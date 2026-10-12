@@ -1,429 +1,163 @@
-# kamihub
+# kamihub · 多平台卡密采购与统一发货系统
 
-> 多平台卡密采购与统一发货中台 —— 把五花八门的上游接口收敛成一套标准接口，
-> 一个商品挂多个货源、失败自动转移，采购成功后生成一条带失效时间的提货链接。
+一个自建的「卡密采购 + 统一发货」中台：把多个上游卡密平台的**各不相同的接口**收敛成一套内部标准接口，
+支持一件商品由**多个平台/多个货源**共同供应，按策略选源、失败自动转移，采购成功后生成一条
+**带失效时间的提货链接**，买家点开就是一个包含卡密、附加内容、商品信息与卖家联系方式的正常网页。
 
-<p align="left">
-  <img alt="Go" src="https://img.shields.io/badge/Go-1.25-00ADD8?logo=go&logoColor=white">
-  <img alt="React" src="https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=white">
-  <img alt="PostgreSQL" src="https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white">
-  <img alt="Redis" src="https://img.shields.io/badge/Redis-7-DC382D?logo=redis&logoColor=white">
-  <img alt="Docker" src="https://img.shields.io/badge/Docker%20Compose-ready-2496ED?logo=docker&logoColor=white">
-  <img alt="License" src="https://img.shields.io/badge/License-MIT-green">
-</p>
+- 后端：Go 1.25 + Gin + GORM（PostgreSQL）+ Redis
+- 后台：React 18 + TypeScript + Vite + Ant Design 5
+- 提货页：Go 服务端渲染（移动端优先，非 SPA，独立于后台）
+- 部署：Docker Compose（backend + web + postgres + redis）
 
 ---
 
 ## 目录
 
-- [它解决什么问题](#它解决什么问题)
-- [功能特性](#功能特性)
-- [架构](#架构)
-- [快速开始](#快速开始)
-- [后台使用流程](#后台使用流程)
-- [API 对接](#api-对接)
-- [多货源路由与故障转移](#多货源路由与故障转移)
-- [成本控制](#成本控制)
-- [上游说明与联系方式处理](#上游说明与联系方式处理)
-- [安全设计](#安全设计)
-- [配置项](#配置项)
-- [生产部署](#生产部署)
-- [运维](#运维)
-- [开发](#开发)
-- [目录结构](#目录结构)
-- [FAQ](#faq)
-- [License](#license)
+- [一、它解决什么问题](#一它解决什么问题)
+- [二、架构](#二架构)
+- [三、快速开始（本机 Docker）](#三快速开始本机-docker)
+- [四、生产部署（服务器 + HTTPS）](#四生产部署服务器--https)
+- [五、后台使用流程](#五后台使用流程)
+- [六、API 对接文档](#六api-对接文档)
+- [七、提货页说明](#七提货页说明)
+- [八、多货源路由与故障转移](#八多货源路由与故障转移)
+- [九、安全设计](#九安全设计)
+- [十、配置项说明](#十配置项说明)
+- [十一、运维](#十一运维)
+- [十二、验收测试](#十二验收测试)
+- [十三、排错](#十三排错)
+- [十四、目录结构](#十四目录结构)
 
 ---
 
-## 它解决什么问题
-
-做卡密/虚拟商品生意的人，通常会同时对接多个上游供货平台。日子久了会遇到这几个问题：
+## 一、它解决什么问题
 
 | 痛点 | kamihub 的做法 |
 | --- | --- |
-| 每个上游平台的文档、签名算法、字段命名都不一样 | **平台适配层**：每个平台一个 adapter，对外只暴露 `Ping / ListGoods / GetGoods / Quote / Purchase / QueryOrder` |
-| 一件商品想从多个平台供货，谁便宜用谁 | **货源（Supply）**：一个商品挂 N 个货源，按策略排序后依次尝试 |
-| 上游某个货源挂了，订单就失败 | **故障转移**：排序结果是「候选列表」，失败自动切下一个 |
-| 上游下单成功但发货慢，重试导致重复扣款 | **两阶段采购**：下单阶段可转移，等发货阶段绝不转移 |
-| 卡密要发给买家，又不想被白嫖/泄露 | **提货链接**：随机 token 即凭证，可设失效时间、访问密码、访问次数，随时作废 |
+| 每个上游平台文档、签名、字段都不一样 | **平台适配层**：每个平台一个 adapter，对外暴露统一的 `Ping/ListGoods/GetGoods/Quote/Purchase/QueryOrder` |
+| 一件商品想从多个平台供货 | **货源（Supply）**：一个商品挂 N 个货源，按策略排序 |
+| 高并发下重复下单、超卖 | `request_id` 数据库唯一索引做**权威幂等** + Redis 分布式锁/限流（Redis 挂了也不破坏正确性） |
+| 上游某个货源挂了 | **故障转移**：按策略返回的是「排序列表」，逐个尝试 |
+| 上游下单成功但发货慢 | **两阶段采购**：下单阶段可转移，等发货阶段绝不转移（避免重复扣款） |
+| 卡密要发给买家但不想泄露 | **提货链接**：随机 token 即凭证，可设失效时间/访问密码/访问次数，随时作废 |
+| 买家要看到"卡密 + 我附加的说明 + 商品信息 + 联系方式" | 提货页统一渲染，附加内容支持 `{{变量}}` 模板 |
 | 配错上游商品编号，要等买家下单才炸 | 建/改货源时**向上游校验商品**，配置期就报错 |
-| 上游供货商在自己的商品说明里夹带联系方式，把复购流量带走 | 每条货源可**覆盖使用说明**，买家看到的是你自己的版本 |
-| 上游涨价，卖出价却没跟着调，一单亏一笔 | **最高供应价**：超过成本红线的货源直接跳过，绝不亏本下单 |
 
 ---
 
-## 功能特性
-
-**采购与发货**
-
-- 多平台适配层，新增平台只需实现一个 adapter（见 [`docs/API.md`](docs/API.md) 附录）
-- 一个商品挂多个货源，4 种选源策略：优先级 / 最低成本 / 库存优先 / 加权轮询
-- 两阶段采购 + 故障转移，失败原因分类（`transient` / `business` / `fatal`）决定要不要换货源
-- 数据库唯一索引做**权威幂等**（`request_id`），Redis 分布式锁兜并发
-- 每笔采购的尝试记录（`order_attempts`）完整落库，失败可复盘
-
-**交付**
-
-- 服务端渲染的提货页（非 SPA），微信/QQ 内置浏览器秒开
-- 随机 token 提货链接，支持失效时间、访问密码、访问次数上限、随时作废
-- 提货页附加内容支持 `{{order_no}} {{cards}} {{total_amount}}` 等占位符模板
-- 商品级模板优先于全局模板
-
-**成本与内容控制**
-
-- **最高供应价**：单笔应付总额（含上游手续费）超过上限的货源自动跳过
-- **货源级使用说明覆盖**：每个上游商品各自一套说明，可一键从上游抓取原文再改
-- **全局文本过滤规则**：关键词替换 / 删整行 / 正则替换，作为兜底
-
-**运维与安全**
-
-- 平台凭证 AES 加密存储，后台只回显「已配置」不回显明文
-- JWT + RBAC（admin / operator），管理员与操作员权限分离
-- 调用日志（含上游原始请求/响应）、审计日志、提货页访问日志
-- 每日消费上限、平台级限流、上游调用重试
-- 健康检查接口 `/health`，Docker healthcheck 开箱可用
-
----
-
-## 架构
+## 二、架构
 
 ```
-                        ┌────────────────────────────────────────────┐
-   买家 / 调用方 ──────▶│  web (Nginx)                               │
-                        │  /api/*  /d/*  /health  → 反向代理          │
-                        └───────────────────┬────────────────────────┘
-                                            │
-                        ┌───────────────────▼────────────────────────┐
-                        │   backend (Go + Gin)                       │
-                        │   ├─ API 层（JWT + RBAC）                   │
-                        │   ├─ 采购编排（两阶段 / 幂等 / 限价）        │
-                        │   ├─ 路由引擎（4 种策略 + 故障转移）         │
-                        │   ├─ 平台适配层（16688 / mock / 可扩展）     │
-                        │   └─ 提货页 SSR（HTML 模板内嵌）             │
-                        └───────┬──────────────────────┬─────────────┘
-                                │                      │
-                     ┌──────────▼─────────┐  ┌─────────▼──────────┐
-                     │  PostgreSQL        │  │  Redis             │
-                     │  业务数据 / 幂等    │  │  分布式锁 / 限流    │
-                     └────────────────────┘  └────────────────────┘
-                                │
-                     ┌──────────▼─────────────────────────────────┐
-                     │  上游平台                                   │
-                     │  16688 开放平台 / …（适配器可扩展）          │
-                     └────────────────────────────────────────────┘
+                    ┌──────────────────────────────┐
+   买家 / 调用方 ───▶│  web (Nginx, 127.0.0.1:8090) │
+                    │  /api/*  /d/*  /health → 反代 │
+                    └──────────────┬───────────────┘
+                                   │
+                    ┌──────────────▼───────────────┐
+                    │   backend (Go, :8080)        │
+                    │   ├─ API 层（JWT + RBAC）    │
+                    │   ├─ 采购编排（两阶段/幂等） │
+                    │   ├─ 路由引擎（4 种策略）    │
+                    │   ├─ 平台适配层（adapter）   │
+                    │   └─ 提货页 SSR（html/template）│
+                    └───┬───────────┬──────────┬───┘
+                        │           │          │
+                 ┌──────▼───┐ ┌─────▼────┐ ┌───▼─────────────┐
+                 │ postgres │ │  redis   │ │ 上游卡密平台     │
+                 │ 业务数据 │ │ 锁/限流  │ │ (16688 / mock …)│
+                 └──────────┘ └──────────┘ └─────────────────┘
 ```
 
-**技术栈**
+关键设计点：
 
-| 层 | 选型 |
-| --- | --- |
-| 后端 | Go 1.25 · Gin · GORM · PostgreSQL 16 · Redis 7 |
-| 后台 | React 18 · TypeScript · Vite · Ant Design 5 |
-| 提货页 | Go `html/template` 服务端渲染（模板内嵌，无需额外静态服务） |
-| 部署 | Docker Compose（backend + web + postgres + redis） |
-
-**为什么提货页不用 SPA**：受众是终端买家，多在微信/QQ 内置浏览器打开，要求秒开不白屏；
-且卡密不该经由前端 API 暴露，服务端直接渲染更安全。
+- **两阶段采购**：阶段一「选货源 + 向上游下单」允许故障转移；阶段二「等待上游发货」**禁止**转移
+  —— 上游订单已创建、钱已扣，换一家就是重复扣款。
+- **策略返回有序列表而非单点**：故障转移天然就是「继续遍历列表」。
+- **失败分类（FailKind）**：
+  - `transient`（网络/5xx/限流）→ 可转移
+  - `business`（余额不足/无库存）→ 可转移
+  - `fatal`（参数/签名/凭证错误）→ **不转移**（换一家也一样错，白花钱）
+- **Redis 是优化不是依赖**：锁与限流走 Redis，但权威幂等靠数据库唯一索引，Redis 不可用时降级不崩。
+- **适配器隔离平台差异**：签名、请求格式、字段命名、状态码映射全部收敛在各自 adapter 内，
+  业务层（路由、编排、提货）不认识任何具体平台。详见 `docs/API.md` 附录 D。
 
 ---
 
-## 快速开始
+## 三、快速开始（本机 Docker）
 
-### 前置
-
-- Docker + Docker Compose v2
-- 或者本机跑：Go 1.25+、Node 20+、PostgreSQL 16、Redis 7
-
-### 1. 拉取并配置
+前置：安装 Docker Desktop / Docker Engine（含 compose v2）。
 
 ```bash
-git clone https://github.com/<your-name>/kamihub.git
 cd kamihub
 cp .env.example .env
 ```
 
-生成两个密钥并填进 `.env`：
+编辑 `.env`，**至少改这三项**：
 
 ```bash
+# 生成密钥
+openssl rand -hex 16   # → DB_PASSWORD
 openssl rand -hex 32   # → JWT_SECRET
-openssl rand -hex 32   # → ENCRYPTION_KEY
+openssl rand -hex 32   # → ENCRYPTION_KEY（另生成一个，不要和上面重复）
 ```
 
-> ⚠️ `ENCRYPTION_KEY` 一旦设置就不要再改，改了会导致已保存的平台凭证全部无法解密。
+```dotenv
+APP_BASE_URL=http://127.0.0.1:8090     # 买家实际能访问到的地址，提货链接前缀
+DEFAULT_ADMIN_PASSWORD=                # 初始管理员密码（留空则自动生成并打印在日志，推荐）
+```
 
-### 2. 起服务
+启动：
 
 ```bash
 docker compose up -d --build
+docker compose ps          # 4 个容器都应为 healthy / running
 curl http://127.0.0.1:8090/health
-# {"code":1,"msg":"ok","data":{"database":true,"env":"production","redis":true}}
 ```
 
-> 编排默认把 backend 绑到 `127.0.0.1:8080`、web 绑到 `127.0.0.1:8090`。
-> 下面统一用 **8090**——它同时提供后台页面、`/api`、`/d` 提货页和 `/health`，
-> 是**唯一需要暴露给买家**的端口。
-
-### 3. 登录后台
-
-浏览器打开 `http://127.0.0.1:8090`。
-
-管理员账号见 `.env` 的 `DEFAULT_ADMIN_USERNAME` / `DEFAULT_ADMIN_PASSWORD`；
-**密码留空则首次启动自动生成并打印在容器日志里**（推荐）：
-
-```bash
-docker compose logs backend | grep -i password
-```
-
-### 4. 跑一遍冒烟测试
-
-仓库自带端到端脚本（会创建一条**真实采购单**，请确认已在后台配好平台与货源）：
-
-```bash
-ADMIN_USER=admin ADMIN_PASS='你的管理员密码' node scripts/e2e.mjs
-```
-
-> 所有 e2e 脚本都从环境变量读登录信息，**不要把口令写进命令历史**时可以先
-> `export ADMIN_PASS=...`。脚本默认连 `127.0.0.1:8090`（即上面的 web 入口）；
-> 若后端单独跑在别的端口，用 `BASE=http://127.0.0.1:其他端口 node scripts/e2e.mjs` 覆盖。
-
----
-
-## 后台使用流程
-
-```
-① 平台管理  →  新增平台，选适配器（如 16688），填 app_id / app_secret，点「测试」连通
-② 商品管理  →  新增商品，设售价、发货方式、选货策略、最高供应价
-③ 货源管理  →  给商品挂货源（从上游选品一键绑定，或手动填上游商品编号）
-④ 使用说明  →  逐条货源设置「买家看到的使用说明」，替换掉上游供货商的联系方式
-⑤ 对接下单  →  调用 POST /api/orders/purchase 触发采购
-⑥ 发货      →  拿返回的 delivery_url 给买家；也可走你的发卡系统
-```
-
----
-
-## API 对接
-
-完整接口文档见 [`docs/API.md`](docs/API.md)，这里给出最常用的部分。
-
-### 通用约定
-
-- Base URL：`https://<你的域名>/api`
-- 认证：`Authorization: Bearer <token>`
-  - 管理员可在后台「令牌」页签发**长期令牌**给对接方使用
-- 统一响应信封：
+期望输出：
 
 ```json
-{ "code": 1, "msg": "success", "time": 1790233660, "data": {} }
+{"code":1,"msg":"ok","time":1790046389,"data":{"database":true,"env":"production","redis":true}}
 ```
 
-`code=1` 成功，`code=0` 失败（同时返回对应 HTTP 状态码）。
+然后浏览器打开 **http://127.0.0.1:8090** → 用 `admin` / 你设置的密码登录后台。
 
-### 触发采购（核心接口）
+> 端口说明：`8090` 是统一入口（前端 + API + 提货页）；`8080` 是后端直连端口，只绑定回环，
+> 生产环境不要对外暴露。
+
+---
+
+## 四、生产部署（服务器 + HTTPS）
+
+### 4.1 准备
 
 ```bash
-curl -X POST https://<你的域名>/api/orders/purchase \
-  -H 'Authorization: Bearer <token>' \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "request_id": "shop1-20260924-0001",
-    "goods_code": "Gemini Pro",
-    "quantity": 1,
-    "remark": "订单备注"
-  }'
+# 服务器：Linux + Docker + Docker Compose v2
+git clone <你的仓库> && cd kamihub
+cp .env.example .env && vi .env
 ```
 
-| 字段 | 必填 | 说明 |
-| --- | --- | --- |
-| `request_id` | ✅ | **幂等键**。同一个值只会真正下单一次，网络重试不会重复扣款 |
-| `goods_code` | ✅ | 你在 kamihub 里配的商品编号 |
-| `quantity` | | 采购数量，默认 1，不得超过商品的单次数量上限 |
-| `remark` | | 透传给上游的备注 |
-| `ttl_hours` | | 提货链接有效期（小时） |
-| `response_mode` | | 控制成功响应形态，见下 |
+生产环境 `.env` 关键项：
 
-**`response_mode`：给只会整段取响应体的发卡系统用**
-
-| 值 | 返回 |
-| --- | --- |
-| `full`（默认） | 完整 JSON |
-| `url` / `link` / `text` | **纯文本**，只有提货链接 |
-| `cards` / `card` / `cardno` | **纯文本**，只有卡密（多张每行一个） |
-
-失败时一律返回标准 JSON 错误信封 + 对应 HTTP 状态码，按状态码判断成败即可。
-
-### 其它常用接口
-
-| 方法 | 路径 | 说明 |
-| --- | --- | --- |
-| `GET` | `/api/orders` | 订单列表（支持 `status` / `goods_id` / `platform_id` / `keyword` / 时间范围） |
-| `GET` | `/api/orders/:id` | 订单详情（含卡密明文与提货链接） |
-| `GET` | `/api/orders/:id/attempts` | 该单的货源尝试记录（排查「为什么没买成」） |
-| `POST` | `/api/orders/:id/retry` | 重新查单（上游已下单但未确认发货时的补偿入口） |
-| `GET` | `/api/deliveries/:id` | 提货链接详情 |
-| `POST` | `/api/deliveries/:id/revoke` | 作废提货链接 |
-| `POST` | `/api/supplies/:id/fetch-instruction` | 从上游抓取该货源的使用说明原文 |
-| `GET` | `/health` | 健康检查（无需认证） |
-
----
-
-## 多货源路由与故障转移
-
-一个商品可以挂多个货源，下单时按所选策略排序，**依次尝试直到成功**：
-
-| 策略 | 标识 | 适用场景 |
-| --- | --- | --- |
-| 优先级 | `priority` | 明确的「主货源 + 备用货源」 |
-| 最低成本 | `cheapest` | 对毛利敏感，各货源质量相当 |
-| 库存优先 | `stock` | 大额采购，优先选库存充足的 |
-| 加权轮询 | `weighted` | 多个等价货源，按权重分摊流量避免被限流 |
-
-**两阶段采购**是整个可靠性的核心：
-
-```
-阶段一：选货源下单（可故障转移）
-  询价 → 限价校验 → 余额/库存校验 → 每日限额校验 → 下单
-  失败且可转移 → 换下一个货源重试（最多 max_attempts 次）
-
-阶段二：等待发货（绝不故障转移）
-  上游返回「待发货」→ 轮询查单直到发货或超时
-  ⚠️ 这里换货源 = 重复扣款，所以只标记为「采购中」等人工/自动补偿
+```dotenv
+APP_BASE_URL=https://api.your-domain.com   # 必须是买家能打开的公网 HTTPS 地址
+LOG_LEVEL=info
+DB_PASSWORD=<openssl rand -hex 16>
+JWT_SECRET=<openssl rand -hex 32>
+ENCRYPTION_KEY=<openssl rand -hex 32>
+DEFAULT_ADMIN_PASSWORD=<强密码>            # 首次登录后立刻改掉
+DELIVERY_DEFAULT_TTL=168h                  # 提货链接默认 7 天
 ```
 
-错误会被归类，决定是否值得换货源：
-
-| 类别 | 含义 | 是否换货源 |
-| --- | --- | --- |
-| `transient` | 网络抖动、超时、5xx、限流 | ✅ |
-| `business` | 余额不足、库存不足、已下架、**超最高供应价** | ✅ |
-| `fatal` | 参数错误、签名错误、凭证失效 | ❌（换也没用） |
-
----
-
-## 成本控制
-
-### 最高供应价（防亏本）
-
-给商品设一条成本红线。采购时用**询价返回的应付总额**（数量 × 单价 + 上游手续费）比较：
-
-- 超过红线 → **跳过该货源，继续试下一个**
-- 全部货源都超限 → 整单失败，错误信息写明「全部 N 个货源的报价都超过最高供应价 X」
-
-```
-报价 4.37 / 上限 5.00  → 放行
-报价 5.00 / 上限 5.00  → 放行（用满额度不算超）
-报价 5.01 / 上限 5.00  → 拦截
-上限 0                 → 不限制（默认，兼容历史商品）
-```
-
-后台商品列表会标出「最高供应价」低于售价的商品，方便一眼发现亏损风险。
-
-### 其它护栏
-
-| 配置 | 作用 |
-| --- | --- |
-| `MAX_DAILY_AMOUNT` | 每日累计消费上限，超过直接拒单 |
-| 平台级限流 | 每个平台每分钟最多调用多少次 |
-| 单次数量上限 | 商品级 `max_quantity` |
-| 余额校验 | 询价时校验上游钱包余额是否够付 |
-
----
-
-## 上游说明与联系方式处理
-
-**问题**：上游供货商经常在自己的商品说明里写 QQ 群、微信号。这些说明会原样展示给买家，
-等于把复购流量引流给供货商。
-
-**做法**：说明按**货源**（即上游商品）逐条设置，因为不同货源来自不同供货商。
-
-```
-货源设了专用说明 → 买家看到的就是这一段（完全替代上游原文）
-没设             → 回落到上游原文
-```
-
-操作路径：**商品与货源 → 货源管理 → 某条货源的「使用说明」**
-
-1. 点「**从上游重新抓取原文**」—— 建货源时也会自动抓，原文存在 `upstream_instruction`
-2. 点「**用上游原文填充**」—— 在原文基础上改，不用从头写
-3. 改成你自己的内容 → 保存
-
-货源列表会用颜色标出状态：🟢 已自定义 / 🟡 用上游原文（可能含供货商联系方式）/ ⚪ 未获取。
-
-**两个关键设计**
-
-- **下单那一刻固化**：订单写入的是「本次实际成交的那条货源」的说明。
-  不在渲染时查，因为货源发货后可能被改甚至被删，那会让已发出去的订单内容跟着变。
-- **卡密绝不参与任何过滤**：那是买家真正要买的东西。
-
-**全局兜底规则**：后台「系统设置 → 使用说明净化」可配一组通用规则，
-对**没设专用说明**的货源做一层清理，三种模式：
-
-| 模式 | 用途 |
-| --- | --- |
-| 关键词替换 | `kf_8888` → `本站客服` |
-| 命中则删整行 | 含「加群」的整行删掉（避免留下「加群领取福利」这种残句） |
-| 正则替换 | `[Qq]{2}[：:]\s*\d+` → 隐藏所有 QQ 号 |
-
-规则支持**启用/停用**与**效果预览**，正则不合法会在保存时直接报错。
-
----
-
-## 安全设计
-
-| 项 | 做法 |
-| --- | --- |
-| 平台凭证 | AES 加密存储；后台只回显「已配置」，不回显明文 |
-| 登录 | JWT + bcrypt 口令哈希，TTL 可配 |
-| 权限 | RBAC：`admin` 可写，`operator` 只读 |
-| 提货页 | `X-Robots-Tag: noindex` + `Cache-Control: no-store` + CSP + `X-Frame-Options: DENY` |
-| 卡密暴露面 | 只在服务端渲染，不经过前端 API；订单**列表**接口不回传卡密明文 |
-| 提货链接 | 随机 token 即凭证，支持失效时间 / 访问密码 / 访问次数上限 / 随时作废 |
-| 上游富文本 | 渲染前做 HTML 白名单净化（[`render/sanitize.go`](backend/internal/render/sanitize.go)） |
-| 审计 | 所有写操作记入 `audit_logs`，上游调用连原始请求/响应一并记入 `platform_call_logs` |
-
----
-
-## 配置项
-
-全部配置来自环境变量，启动时一次性校验，缺项直接退出（fail fast，避免带病上线花钱）。
-完整列表见 [`.env.example`](.env.example)，关键项：
-
-| 变量 | 必填 | 说明 |
-| --- | --- | --- |
-| `APP_BASE_URL` | ✅ | 买家能访问到的公网地址，提货链接拼成 `${APP_BASE_URL}/d/{token}` |
-| `DB_USER` / `DB_PASSWORD` / `DB_NAME` | ✅ | PostgreSQL 连接 |
-| `JWT_SECRET` | ✅ | `openssl rand -hex 32` |
-| `ENCRYPTION_KEY` | ✅ | `openssl rand -hex 32`，**设置后不要改** |
-| `DEFAULT_ADMIN_USERNAME` | | 默认 `admin` |
-| `DEFAULT_ADMIN_PASSWORD` | | 留空则首次启动自动生成并打印在日志 |
-| `DELIVERY_DEFAULT_TTL` | | 提货链接默认有效期，默认 `168h` |
-| `UPSTREAM_POLL_TIMEOUT` | | 上游「待发货」时最长轮询时间，默认 `30s` |
-| `UPSTREAM_VERIFY_SUPPLY` | | 建/改货源时向上游校验商品，默认 `true` |
-
----
-
-## 生产部署
-
-### 服务器准备
+启动：
 
 ```bash
-# Linux + Docker + Docker Compose v2
-curl -fsSL https://get.docker.com | sh
-```
-
-### 部署
-
-```bash
-git clone https://github.com/<your-name>/kamihub.git /opt/kamihub
-cd /opt/kamihub
-cp .env.example .env && vi .env      # 填 APP_BASE_URL / 密钥 / 数据库口令
 docker compose up -d --build
 ```
 
-> 注意：`docker-compose.yml` 默认把 backend 绑到 `127.0.0.1:8080`、web 绑到 `127.0.0.1:8090`，
-> **不直接暴露公网**。如果这两个端口被占用（比如同机跑了别的服务），改端口映射左侧即可。
+### 4.2 外层 Nginx + HTTPS
 
-### 外层 Nginx + HTTPS
+compose 里的 `web` 只监听 `127.0.0.1:8090`（明文 HTTP），公网入口交给宿主机 Nginx 终止 TLS：
 
 ```nginx
 server {
@@ -433,7 +167,7 @@ server {
     ssl_certificate     /etc/letsencrypt/live/api.your-domain.com/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/api.your-domain.com/privkey.pem;
 
-    client_max_body_size 2m;
+    client_max_body_size 1m;
 
     location / {
         proxy_pass http://127.0.0.1:8090;
@@ -443,187 +177,618 @@ server {
         proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
 
-        # 采购接口会等上游发货轮询，超时要给够
+        # 采购接口可能等待上游发货（轮询），超时要给够
         proxy_read_timeout 120s;
-        proxy_send_timeout 120s;
         proxy_buffering    off;
     }
 }
+
+server {
+    listen 80;
+    server_name api.your-domain.com;
+    return 301 https://$host$request_uri;
+}
 ```
 
-证书用 certbot 签发：
-
 ```bash
-certbot --nginx -d api.your-domain.com
+certbot --nginx -d api.your-domain.com      # 申请证书
+nginx -t && systemctl reload nginx
 ```
 
-### 只重建某个服务
+> ⚠️ 上线后务必确认 `APP_BASE_URL` 与真实域名一致。它决定了提货链接的前缀，
+> 配错了买家会拿到打不开的链接。
 
-```bash
-docker compose up -d --build backend   # 只重建后端
-docker compose up -d --build web       # 只重建前端
+### 4.3 防火墙
+
+只放行 `80/443`。`8080` 与 `8090` 都绑定在回环地址上，不应对外暴露；
+PostgreSQL 与 Redis 完全没有映射到宿主机端口，仅在 compose 内网可达。
+
+---
+
+## 五、后台使用流程
+
+登录后台后，按下面顺序配置（左侧菜单从上到下）：
+
+**1. 平台管理（Platforms）**
+新建平台 → 选择适配器（`16688` 或 `mock`）→ 填凭证 → 点「测试连接」确认能通。
+
+- `16688 开放平台` 需要 `App ID` + `App Secret`（商户后台 → 其他渠道 → API → 对接配置）
+- `模拟货源（mock）` 不需要真实凭证，用 `extra` JSON 控制行为，专门用于联调和验收：
+  ```json
+  { "stock": 100, "balance": 10000, "unit_price": 12.5,
+    "fail_quote": false, "fail_purchase": false,
+    "delivery_status": "delivered", "poll_success_after": 1,
+    "delay_ms": 0, "prefix": "MOCK" }
+  ```
+
+**2. 商品管理（Goods）**
+新建商品：`code`（调用方用的商品编号，全局唯一）、名称、价格、最大购买数量、
+**路由策略**（`priority` / `cheapest` / `stock` / `weighted`）、是否启用故障转移、最大尝试次数。
+
+**3. 货源（Supplies）**
+在商品下挂多个货源：每个货源绑定「平台 + 该平台上的商品编号」，
+设置成本价、优先级、权重、启用状态。
+点「选品」可以从上游拉商品列表直接绑定，**编号与成本价会自动带过来，库存由后端询价预填**。
+
+**4. 系统设置（Settings）**
+- **品牌信息**：站点名称、Logo、提货页显示项
+- **卖家联系方式**：微信/QQ/邮箱/Telegram/电话等条目（可启用/停用）+ 服务时间 + 提示语
+- **安全与风控**：提货链接默认有效期等
+
+**5. 订单 / 提货管理 / 用户 / 日志**
+- 订单：查状态、看卡密、看重试记录、手动重试
+- 提货管理：看访问次数、**延长有效期**、**设置访问密码**、**立即作废**
+- 用户：单租户多操作员（管理员 / 操作员两种角色）
+- 日志：上游调用日志（含耗时与错误）+ 操作审计日志
+
+---
+
+## 六、API 对接文档
+
+> 完整版（47 条路由逐条说明、请求/响应字段、枚举、模板变量、审核清单）见 **`docs/API.md`**。
+> 数据库结构（11 张表、索引、外键）见 **`docs/DATABASE.md`**。
+
+### 6.1 通用约定
+
+- Base URL：`https://api.your-domain.com`（本机：`http://127.0.0.1:8090`）
+- 请求/响应均为 JSON，`Content-Type: application/json`
+- 统一响应信封：
+
+```json
+{ "code": 1, "msg": "success", "time": 1790046389, "data": { } }
+```
+
+- `code = 1` 成功，`code = 0` 失败（`msg` 为中文原因，`error_code` 为机器可读错误码）
+- 业务失败同时返回合适的 HTTP 状态码：`400 / 401 / 403 / 404 / 409 / 502 / 500`
+- 需登录的接口带：`Authorization: Bearer <token>`
+- 金额字段序列化为**字符串**（如 `"12.50"`），避免浮点误差
+
+### 6.2 登录
+
+```http
+POST /api/auth/login
+Content-Type: application/json
+
+{ "username": "admin", "password": "你的密码" }
+```
+
+```json
+{
+  "code": 1, "msg": "success", "time": 1790046389,
+  "data": {
+    "token": "eyJhbGciOiJIUzI1NiIs...",
+    "expires_in_seconds": 43200,
+    "user": { "id": 1, "username": "admin", "role": "admin" }
+  }
+}
+```
+
+令牌有效期由 `JWT_TTL` 控制（默认 `12h`）。后续请求：
+
+```http
+Authorization: Bearer eyJhbGciOiJIUzI1NiIs...
+```
+
+### 6.3 触发采购（核心接口）
+
+> 这就是「**用 API 方式把购买的内容发出去**」的入口：服务端已固定配置好商品与货源，
+> 调用方只需要传商品编号和数量，返回订单详情 + 提货链接。
+
+```http
+POST /api/orders/purchase
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "request_id": "order-20260922-0001",   // 必填，幂等键，调用方自己生成且全局唯一
+  "goods_code": "TX-VIP-MONTH",          // 必填，后台配置的商品编号
+  "quantity": 1,                          // 可选，默认 1，不得超过商品的 max_quantity
+  "remark": "客户备注",                    // 可选
+  "ttl_hours": 168                        // 可选，提货链接有效期（小时），默认取系统设置
+}
+```
+
+成功响应：
+
+```json
+{
+  "code": 1, "msg": "success", "time": 1790046389,
+  "data": {
+    "order": {
+      "order_no": "KM20260922153012AB3D9F1K",
+      "request_id": "order-20260922-0001",
+      "status": "delivered",
+      "quantity": 1,
+      "unit_price": "12.50",
+      "total_amount": "12.50",
+      "platform_trade_no": "16688-88776655",
+      "cards": [{ "code": "DEMO-20260922-001", "sold_time": 1790046389 }],
+      "content": "",
+      "instruction": "在腾讯视频 App 内兑换",
+      "extra_text": "渲染后的附加内容",
+      "delivered_at": "2026-09-22T15:30:12+08:00"
+    },
+    "cards": ["DEMO-20260922-001"],
+    "delivery_url": "https://api.your-domain.com/d/zNIZUyDGov1PX7x8efHM7TYe6YYo1pfkMvVtx8gTzI0",
+    "delivery_token": "zNIZUyDGov1PX7x8efHM7TYe6YYo1pfkMvVtx8gTzI0"
+  }
+}
+```
+
+> 注意两个 `cards` 形态不同：`data.order.cards` 是**对象数组**（来自上游），
+> `data.cards` 是**字符串数组**（提取后的卡密文本）。按需取用。
+
+订单状态 `status`：
+
+| 状态 | 含义 |
+| --- | --- |
+| `pending` | 已受理，尚未开始采购 |
+| `purchasing` | 采购中（含已向上游下单、正在等待发货） |
+| `delivered` | 采购成功、已发货，提货链接可访问 |
+| `failed` | 全部货源尝试失败（看 `error_msg` / `error_kind`） |
+| `closed` | 人工关闭 |
+| `refunded` | 已退款 |
+
+> 上游下单成功但发货慢时，订单会停在 `purchasing`，此时可用「重试」重新查询上游发货状态。
+
+**幂等**：相同 `request_id` 重复调用不会重复下单，直接返回第一次的订单结果。
+`request_id` 在数据库有唯一索引，这是权威保证，不依赖 Redis。
+
+**失败分类**：`transient`（网络/5xx/限流）与 `business`（余额/库存）会换下一个货源；
+`fatal`（参数/签名/凭证）立即终止。
+
+### 6.4 查询订单
+
+```http
+GET /api/orders/:id              # 订单详情（含卡密明文与提货链接）
+GET /api/orders?page=1&page_size=20&status=delivered&keyword=KM2026
+GET /api/orders/:id/attempts     # 该订单的每次货源尝试记录（哪家、成功与否、耗时、失败分类）
+POST /api/orders/:id/retry       # 对失败/卡住的订单重新查询上游发货状态
+```
+
+> 列表接口**不返回卡密明文**（`cards` 恒为 `null`），只返回 `card_count`，
+> 避免列表页成为卡密泄露面；明文只在订单详情接口返回。
+
+### 6.5 提货链接管理
+
+```http
+GET  /api/deliveries                        # 列表（含访问次数、状态、过期时间）
+GET  /api/deliveries/:id
+POST /api/deliveries/:id/extend             # { "hours": 72 }  延长有效期
+POST /api/deliveries/:id/revoke             # { "reason": "客户退款" }  立即作废
+POST /api/deliveries/:id/password           # { "password": "1234" }   设置/清除访问密码
+GET  /api/deliveries/:id/views              # 访问记录（IP / UA / Referer / 时间）
+```
+
+### 6.6 货源绑定相关接口
+
+```http
+GET  /api/platforms/:id/goods?keyword=&page=&page_size=   # 拉取该平台的上游商品（选品用）
+POST /api/goods/:id/supplies                              # 新增货源
+PUT  /api/supplies/:id                                    # 修改货源
+POST /api/supplies/:id/sync-stock                         # 重新询价，刷新库存与成本
+```
+
+新增货源请求体：
+
+```json
+{
+  "platform_id": 2,
+  "platform_goods_no": "10086",   // 通常由「选品」自动填入，也可手工传
+  "cost_price": 9.5,              // 可选；不传则用上游询价单价
+  "priority": 1,                  // 越小越优先
+  "weight": 50,
+  "enabled": true,
+  "skip_verify": false            // 可选；true = 本次跳过上游校验
+}
+```
+
+> **建/改货源时会向上游校验商品**（受 `UPSTREAM_VERIFY_SUPPLY` 控制，默认开）：
+> 配错上游编号会在**配置时**就返回 `502` / `UPSTREAM_ERROR`，而不是等买家下单才失败。
+> 同时用询价结果**自动预填** `stock` 与 `cost_price`（显式传了成本价则不覆盖）。
+> 上游临时不可用时，可传 `"skip_verify": true` 单次跳过，或把 `UPSTREAM_VERIFY_SUPPLY` 设为 `false`。
+
+**编码范围**：`platform_id` 必须 > 0 且平台存在；`platform_goods_no` 上限 128 字符、去空格后不得为空。
+三者组合 `(goods_id, platform_id, platform_goods_no)` 有**复合唯一约束**，重复绑定返回
+`400`「该商品在此平台下已配置过该货源」。
+
+### 6.7 其它接口
+
+| 方法 | 路径 | 权限 | 说明 |
+| --- | --- | --- | --- |
+| GET | `/health` | 公开 | 健康检查（数据库 + Redis） |
+| GET | `/api/adapters` | 登录 | 可用平台适配器及凭证字段定义 |
+| GET | `/api/strategies` | 登录 | 可用路由策略 |
+| GET | `/api/platforms` | 登录 | 平台列表 |
+| POST/PUT/DELETE | `/api/platforms[/:id]` | 管理员 | 平台增删改 |
+| POST | `/api/platforms/:id/test` | 管理员 | 测试连接 |
+| GET | `/api/goods` `/api/goods/:id` | 登录 | 商品查询 |
+| POST/PUT/DELETE | `/api/goods[/:id]` | 管理员 | 商品增删改 |
+| DELETE | `/api/supplies/:id` | 管理员 | 删除货源 |
+| GET | `/api/settings` | 登录 | 全部设置 |
+| PUT | `/api/settings/:key` | 管理员 | 修改某项设置 |
+| GET/POST/PUT/DELETE | `/api/users[/:id]` | 管理员 | 操作员账号管理 |
+| POST | `/api/users/:id/reset-password` | 管理员 | 重置密码 |
+| GET | `/api/dashboard/stats` | 登录 | 概览统计 |
+| GET | `/api/call-logs` | 登录 | 上游调用日志 |
+| GET | `/api/audit-logs` | 登录 | 操作审计日志 |
+
+---
+
+## 七、提货页说明
+
+买家拿到的链接形如：
+
+```
+https://api.your-domain.com/d/<32字节随机token的base64url>
+```
+
+**它是一条独立于后台 SPA 的服务端渲染页面**，移动端优先，包含：
+
+- 商品信息（名称、图片、数量、金额）
+- **卡密**（支持一键复制）
+- 附加内容（你配置的说明、教程、群号等）
+- 商品说明 / 使用说明
+- **卖家联系方式**（微信、QQ、邮箱、Telegram、电话…，可逐项启用）
+- 服务时间与提示语
+- 失效时间提示
+
+### 7.1 失效与作废
+
+- 生成时按 `ttl_hours` 或系统默认 `DELIVERY_DEFAULT_TTL`（默认 168h = 7 天）设定过期时间
+- 过期、被作废、超过最大访问次数时，页面显示**友好提示 + 卖家联系方式**，而不是 404
+- 后台可随时「延长有效期」或「立即作废」（如客户退款）
+
+### 7.2 访问密码（可选）
+
+后台可给单条链接设访问密码。设了密码后：
+
+- 未验证时**不泄露任何卡密**
+- `POST /d/:token` 提交密码，成功后 `303` 重定向回 `GET /d/:token`
+- 解锁状态记在 HMAC 签名的 Cookie 里（`kmh_u_<sha256(token)前8位>`），无需重复输入
+
+### 7.3 安全头（每条提货页都带）
+
+```
+X-Robots-Tag: noindex, nofollow, noarchive, nosnippet
+Cache-Control: no-store, no-cache, must-revalidate, private
+X-Frame-Options: DENY
+Content-Security-Policy: default-src 'none'; img-src https: data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'self'
+Referrer-Policy: no-referrer
+X-Content-Type-Options: nosniff
+```
+
+另有 `/robots.txt` 输出 `Disallow: /d/`，避免搜索引擎收录提货页。
+
+### 7.4 附加内容模板变量
+
+商品的 `extra_template`（或全局的 `delivery_page.extra_template`）支持 `{{变量}}`，渲染时替换：
+
+| 变量 | 含义 |
+| --- | --- |
+| `{{order_no}}` | 订单号 |
+| `{{trade_no}}` | 上游交易号 |
+| `{{goods_code}}` / `{{goods_name}}` | 商品编号 / 名称 |
+| `{{quantity}}` | 数量 |
+| `{{unit_price}}` / `{{total_amount}}` | 单价 / 总金额 |
+| `{{cards}}` | 卡密，**每行一个** |
+| `{{cards_inline}}` | 卡密，**逗号分隔** |
+| `{{card_count}}` | 卡密张数 |
+| `{{content}}` / `{{instruction}}` | 卡密正文 / 使用说明 |
+| `{{deliver_time}}` / `{{now}}` / `{{date}}` | 发货时间 / 当前时间 / 当前日期 |
+
+未定义的占位符会**原样保留**，方便排查拼写错误。
+
+示例模板：
+
+```
+卡密（{{card_count}} 张）：
+{{cards}}
+
+如有问题请加客服微信，备注订单号 {{order_no}}
 ```
 
 ---
 
-## 运维
+## 八、多货源路由与故障转移
+
+商品上配置 `routing_strategy`，可选四种：
+
+| 策略 | 排序依据 | 适用场景 |
+| --- | --- | --- |
+| `priority` | 货源 `priority` 升序（数字小优先） | 有稳定主力货源，备用兜底 |
+| `cheapest` | 货源 `cost_price` 升序 | 纯成本导向 |
+| `stock` | 货源 `stock` 降序 | 优先消耗库存多的，避免频繁切换 |
+| `weighted` | 权重随机（指数键 `-ln(U)/weight`） | 按比例分摊到多个货源 |
+
+配合：
+
+- `failover_enabled`：是否允许失败后换下一家
+- `max_attempts`：单次采购最多尝试几个货源
+
+**故障转移规则**
+
+1. 策略返回的是**排好序的货源列表**，逐个尝试直到成功。
+2. 阶段一（下单）失败分类为 `transient` / `business` → 继续试下一家。
+3. 失败分类为 `fatal`（签名错、参数错、凭证无效）→ **立即终止**，不浪费其它货源。
+4. **阶段二（等待上游发货）绝不转移** —— 上游订单已创建、已扣款，换一家等于重复扣款。
+   此时若超时，订单停在 `purchasing`，由后台「重试」按钮重新查询上游状态。
+5. 每次尝试都落一条 `order_attempts` 记录（哪家货源、哪个平台、成功与否、失败分类、耗时），
+   后台订单详情可查。
+
+---
+
+## 九、安全设计
+
+| 项 | 做法 |
+| --- | --- |
+| 提货链接凭证 | `crypto/rand` 生成 32 字节随机 token（base64url），**绝不用订单号**（可枚举） |
+| 提货页索引 | `noindex` + `no-store` + `robots.txt Disallow /d/` |
+| 平台凭证存储 | AES-256-GCM 加密后入库（`ENCRYPTION_KEY`），接口只回显掩码 |
+| 登录密码 | bcrypt 哈希 |
+| 登录令牌 | JWT（HS256），`JWT_TTL` 控制有效期 |
+| 权限 | 两级角色：`admin`（全部）/ `operator`（只读业务数据，不能改平台/商品/用户/设置） |
+| 卡密泄露面 | **列表接口只回 `card_count`（`cards` 恒为 `null`）**；日志与调用记录对卡密/凭证做脱敏 |
+| 幂等 | `request_id` 数据库唯一索引（权威） |
+| 并发 | Redis 分布式锁（SETNX + Lua 释放）+ 固定窗口限流 |
+| 资金安全 | 失败**关闭**（fail-closed）；可配每日消费上限；两阶段采购不重复扣款 |
+| 网络暴露 | 后端与 web 只绑回环；Postgres/Redis 不映射端口 |
+
+> ⚠️ `ENCRYPTION_KEY` 一旦设定**不要再改**：改了会导致已保存的平台凭证全部无法解密，需要重新录入。
+
+---
+
+## 十、配置项说明
+
+`.env`（compose 读取，模板见 `.env.example`）：
+
+| 变量 | 必填 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `APP_BASE_URL` | ✅ | — | 提货链接前缀，必须是买家能访问的地址 |
+| `DB_USER` / `DB_PASSWORD` / `DB_NAME` | ✅ | `kamihub` / — / `kamihub` | PostgreSQL 连接 |
+| `JWT_SECRET` | ✅ | — | `openssl rand -hex 32`，签发登录令牌 |
+| `ENCRYPTION_KEY` | ✅ | — | `openssl rand -hex 32`，加密平台凭证（**勿改**） |
+| `JWT_TTL` | | `12h` | 登录令牌有效期 |
+| `DEFAULT_ADMIN_USERNAME` / `DEFAULT_ADMIN_PASSWORD` | | `admin` / 自动生成 | 初始管理员；密码留空则首次启动生成并打印到日志 |
+| `DELIVERY_DEFAULT_TTL` | | `168h` | 提货链接默认有效期 |
+| `DELIVERY_TOKEN_BYTES` | | `32` | token 随机字节数，不要低于 16 |
+| `UPSTREAM_POLL_TIMEOUT` | | `30s` | 等待上游发货的最长轮询时间 |
+| `UPSTREAM_POLL_INTERVAL` | | `2s` | 轮询间隔 |
+| `UPSTREAM_VERIFY_SUPPLY` | | `true` | 建/改货源时向上游校验商品并预填库存与成本。设为 `false` 可关闭 |
+| `LOG_LEVEL` | | `info` | `debug` / `info` / `warn` / `error` |
+| `APP_ENV` / `APP_HOST` / `APP_PORT` / `TRUST_PROXY` | | 由 compose 注入 | 一般不用改 |
+| `DB_AUTO_MIGRATE` | | `true` | 启动时自动建表/迁移 |
+
+---
+
+## 十一、运维
+
+### 11.1 日常命令
 
 ```bash
-docker compose ps                  # 状态
-docker compose logs -f backend     # 实时日志
-docker compose restart backend     # 重启
-docker compose down                # 停止（数据卷保留）
+docker compose ps                      # 状态
+docker compose logs -f backend         # 后端日志
+docker compose logs -f web             # Nginx 日志
+docker compose restart backend         # 重启后端
+docker compose up -d --build backend   # 改代码后重建
+docker compose down                    # 停止（保留数据卷）
+docker compose down -v                 # ⚠️ 停止并删除数据（含数据库）
 ```
 
-**备份 / 恢复**
+### 11.2 数据库备份 / 恢复
 
 ```bash
 # 备份
-docker exec kamihub-postgres pg_dump -U kamihub kamihub > backup-$(date +%Y%m%d).sql
+docker exec kamihub-postgres pg_dump -U kamihub kamihub > backup-$(date +%F).sql
 
 # 恢复
-cat backup-20260924.sql | docker exec -i kamihub-postgres psql -U kamihub -d kamihub
+cat backup-2026-09-22.sql | docker exec -i kamihub-postgres psql -U kamihub -d kamihub
 ```
 
-**健康检查**
+建议加一条 cron 每日备份到异地。数据卷：`pg-data`（数据库）、`redis-data`（Redis AOF）。
+
+### 11.3 健康检查
 
 ```bash
-curl http://127.0.0.1:8090/health
-# {"code":1,"msg":"ok","data":{"database":true,"env":"production","redis":true}}
+curl -s http://127.0.0.1:8090/health
+# {"code":1,...,"data":{"database":true,"redis":true,"env":"production"}}
 ```
 
-### 排错
+数据库不通时返回 `503`，可直接接入监控/告警。
 
-| 现象 | 排查方向 |
+### 11.4 升级
+
+```bash
+git pull
+docker compose up -d --build
+```
+
+`DB_AUTO_MIGRATE=true` 会在启动时自动补齐表结构（**只增不删**，不会修改字段类型、不会加约束）。
+升级前先备份数据库。
+
+> ⚠️ **重要**：若升级前数据库里**已存在重复货源**（同一 `goods_id` + `platform_id` + `platform_goods_no`），
+> 新增的复合唯一索引会导致 `AutoMigrate` 失败、后端启动异常。升级前先跑一次检查：
+>
+> ```bash
+> docker exec kamihub-postgres psql -U kamihub -d kamihub -c \
+>   "SELECT goods_id, platform_id, platform_goods_no, count(*) FROM supplies
+>    GROUP BY 1,2,3 HAVING count(*) > 1;"
+> ```
+>
+> 有结果就先清理重复行，再启动新版本。
+
+---
+
+## 十二、验收测试
+
+仓库自带一套 71 项的端到端验收脚本，覆盖真实 HTTP 链路（Nginx → Go → Postgres/Redis → 模拟上游）：
+
+```bash
+cd kamihub
+ADMIN_USER=admin ADMIN_PASS='你的管理员密码' BASE=http://127.0.0.1:8090 node scripts/e2e.mjs
+```
+
+> 登录信息一律从环境变量读取，**脚本里不存任何口令**。
+> 不想把密码写进命令历史时，先 `export ADMIN_PASS=...` 再执行。
+> 同理，`scripts/demo-link.mjs` 与 `scripts/import-upstream-goods.mjs` 也走
+> `ADMIN_USER` / `ADMIN_PASS` 这两个变量。
+
+覆盖范围：
+
+| # | 场景 |
 | --- | --- |
-| 采购报「所有货源均不可用」 | 看 `GET /api/orders/:id/attempts`，每条货源失败原因都在里面 |
-| 采购报「超过最高供应价」 | 上游涨价了。要么调高限价，要么换便宜货源 |
-| 上游报「签名验证失败」 | 检查 `app_id` / `app_secret`；服务器时间偏差超过 ±300 秒也会过期 |
-| 提货页打不开 | 检查链接是否过期/被作废/访问次数用尽（后台「提货链接」页可看） |
-| 后台登录后立刻 401 | `JWT_SECRET` 变更过，重新登录即可 |
+| 0 | 健康检查（数据库 + Redis） |
+| 1 | 鉴权（错误密码被拒、登录、无令牌被拒） |
+| 2 | 适配器与路由策略列表 |
+| 3 | 创建两个模拟平台 |
+| 4 | 商品与多货源配置 |
+| 4b | 建货源的上游校验与缓存预填（预填库存/成本、显式成本不被覆盖、`skip_verify` 可跳过） |
+| 5 | 正常采购全链路（下单 → 发货 → 卡密 → 提货链接） |
+| 6 | 幂等（同 `request_id` 不重复下单）+ 订单列表不泄露卡密明文 |
+| 7 | 故障转移：主货源业务失败 → 自动切备用 |
+| 8 | 致命错误不故障转移 |
+| 9 | 库存不足 → 自动换货源 |
+| 10 | 提货页（内容完整性 + 安全响应头） |
+| 11 | 提货链接管理（延长 / 作废 / 访问记录） |
+| 12 | 提货页访问密码（未验证不泄露卡密 / 错误密码被拒 / 正确密码解锁） |
+| 13 | 参数校验（超量、缺 `request_id`、商品不存在、重复绑定货源） |
+| 14 | 概览统计与日志（上游调用日志、审计日志） |
+| 15 | 用户体系（创建操作员、操作员登录、越权被拒 403、删除） |
+
+期望输出：
+
+```
+================================================================
+共 71 项，通过 71 项，失败 0 项
+全部通过 ✅
+```
+
+另有一个辅助脚本，用来生成一条**可视化检查用**的提货链接：
+
+```bash
+BASE=http://127.0.0.1:8090 node scripts/demo-link.mjs
+# 订单状态: delivered
+# 卡密: ["DEMO-20260922-001", ...]
+# 提货链接: http://127.0.0.1:8090/d/xxxxx
+```
+
+### 本地开发（不用 Docker 跑后端）
+
+`backend/.env.dev` 是给本机直跑 Go 二进制用的配置（数据库 `127.0.0.1:15432`、Redis `127.0.0.1:16379`）：
+
+```bash
+docker compose up -d postgres redis      # 或者用独立的开发容器
+cd backend && go run ./cmd/server
+```
+
+单元测试：
+
+```bash
+cd backend && go test ./...              # 签名、路由策略等
+cd frontend && npm run typecheck && npm run build
+```
 
 ---
 
-## 开发
+## 十三、排错
 
-**后端**
-
-```bash
-cd backend
-go run ./cmd/server        # 需要本机 PostgreSQL + Redis，或先起 docker compose up -d postgres redis
-go test ./...              # 单元测试
-go vet ./...
-```
-
-**前端**
-
-```bash
-cd frontend
-npm install
-npm run dev                # Vite dev server，/api 自动代理到 127.0.0.1:8080
-npm run build              # 产物在 frontend/dist
-npm run typecheck
-```
-
-**新增一个上游平台适配器**
-
-1. 在 `backend/internal/platform/<code>/` 下实现 `platform.Factory` 与 `platform.Client`
-   （`Ping / ListGoods / GetGoods / Quote / Purchase / QueryOrder`）
-2. 把错误归类到 `FailKind`（`transient` / `business` / `fatal`）—— 这决定要不要换货源
-3. 在启动时注册到 `platform.Registry`
-4. 后台「平台管理 → 新增平台」即可选到该适配器，凭证字段由 `CredentialFields()` 定义
-
-> 适配层已把「签名、错误分类、状态映射」收敛在 adapter 内部，
-> 业务层（路由、编排、提货）**不需要任何改动**。
+| 现象 | 原因 / 处理 |
+| --- | --- |
+| `/health` 返回 503 且 `database:false` | 数据库没起来或密码不符。`docker compose logs postgres`；确认 `.env` 的 `DB_PASSWORD` 与卷里已有数据一致（改过密码需重建卷） |
+| 页面能打开但所有请求 404 | Nginx 没把 `/api/` 转发到后端。检查 `deploy/nginx-web.conf` 是否被打进镜像（改完要 `docker compose up -d --build web`） |
+| Nginx 报 `no resolver defined to resolve backend` | `proxy_pass` 用了变量却没声明 `resolver`。已在 `nginx-web.conf` 里配 `resolver 127.0.0.11`（Docker 内嵌 DNS） |
+| 页面中文乱码 | Nginx 未声明 `charset utf-8`。已在 `nginx-web.conf` 中显式设置 |
+| 平台凭证解密失败 | `ENCRYPTION_KEY` 被改过。改回原值，或删除平台后重新录入凭证 |
+| 采购报「签名错误」 | `App ID` / `App Secret` 不对，或服务器时间偏差超过 300 秒（上游要求 ±300s，请校时 NTP） |
+| 建货源报 502 / `UPSTREAM_ERROR` | 上游校验没过（编号不存在 / 平台不可达 / 凭证失效）。核对上游编号，或临时传 `skip_verify: true` |
+| 建货源报 400「已配置过该货源」 | 同一商品在同一平台下重复绑定了同一个上游商品。检查该商品的货源列表 |
+| 订单一直停在 `purchasing` | 上游发货慢。到订单详情点「重试」，或调 `POST /api/orders/:id/retry` |
+| 提货链接打不开 | 检查 `APP_BASE_URL` 是否与真实域名一致；确认链接未过期/未作废（提货管理里看状态） |
+| 后端启动报唯一索引创建失败 | 库里已有重复货源。按第十一章 11.4 的 SQL 查出并清理 |
+| `docker compose build` 拉镜像超时 | 国内网络问题，可用镜像加速：`docker pull docker.1ms.run/library/<image>` 后 `docker tag` 成原名 |
 
 ---
 
-## 目录结构
+## 十四、目录结构
 
 ```
 kamihub/
-├── backend/
-│   ├── cmd/server/              # 入口
+├── docker-compose.yml          # 4 服务编排（backend / web / postgres / redis）
+├── .env.example                # 环境变量模板（复制成 .env）
+├── README.md                   # 本文档
+├── docs/
+│   ├── API.md                  # 完整 API 参考（47 条路由）
+│   └── DATABASE.md             # 数据库结构说明（11 张表）
+├── backend/                    # Go 后端
+│   ├── Dockerfile              # 多阶段构建，非 root 运行，内置健康检查
+│   ├── .env.dev                # 本机直跑后端用的开发配置
+│   ├── cmd/server/main.go      # 入口：装配依赖 → 启动 HTTP
 │   └── internal/
-│       ├── api/                 # HTTP 层：路由、中间件、handler
-│       ├── service/             # 业务：采购编排、路由、提货、设置、鉴权
-│       ├── platform/            # 上游适配层
-│       │   ├── f16688/          #   16688 开放平台适配器（签名 + 接口实现）
-│       │   └── mock/            #   本地联用的模拟平台
-│       ├── routing/             # 选源策略与故障转移
-│       ├── render/              # 提货页 SSR + HTML 净化 + 内嵌模板
-│       ├── pkg/textfilter/      # 使用说明文本过滤规则引擎
-│       ├── models/              # GORM 模型
-│       ├── database/            # 连接、迁移、初始化数据
-│       ├── cache/               # Redis 锁 / 限流
-│       └── config/              # 环境变量解析与校验
-├── frontend/                    # React + Ant Design 管理后台
-├── deploy/                      # Nginx 配置示例
-├── docs/                        # API.md / DATABASE.md
-├── scripts/                     # e2e 与运维辅助脚本
-└── docker-compose.yml
+│       ├── api/                # 路由、中间件、各资源 handler、统一响应
+│       ├── cache/              # Redis 客户端（锁 / 限流 / 幂等快路径）
+│       ├── config/             # 配置加载（godotenv + 环境变量）
+│       ├── database/           # PostgreSQL 连接与迁移
+│       ├── logger/             # 结构化日志
+│       ├── models/             # 数据模型（platform/goods/order/delivery/user…）
+│       ├── pkg/crypto/         # AES-256-GCM、bcrypt、随机 token
+│       ├── pkg/tmpl/           # {{变量}} 模板渲染与拼接
+│       ├── platform/           # 平台适配层：接口 + 注册表 + 统一错误分类
+│       │   ├── f16688/         # 16688 开放平台适配器（含签名实现与单测）
+│       │   └── mock/           # 模拟货源适配器（联调/验收用）
+│       ├── render/             # 提货页服务端渲染（templates/delivery.html）
+│       ├── routing/            # 多货源路由引擎（4 种策略，含单测）
+│       └── service/            # 业务服务：认证/平台/商品/订单编排/提货/设置/审计
+├── frontend/                   # React + AntD 管理后台
+│   ├── Dockerfile              # node 构建 → nginx 托管
+│   └── src/
+│       ├── api/                # axios 客户端与类型定义
+│       ├── auth/               # 登录态上下文
+│       ├── layout/             # 后台框架布局
+│       └── pages/              # Login/Dashboard/Platforms/Goods/Orders/
+│                               # Deliveries/Users/Settings/Logs
+├── deploy/nginx-web.conf       # 前端静态资源 + /api、/d 反向代理配置
+└── scripts/
+    ├── e2e.mjs                 # 71 项端到端验收脚本
+    └── demo-link.mjs           # 生成可视化检查用的提货链接
 ```
 
 ---
 
-## FAQ
+## 附：关于第二个平台（链动小铺）
 
-<details>
-<summary><b>支持哪些上游平台？</b></summary>
+`../链动小铺API调研报告.md` 记录了对链动小铺（ldxp.cn / pay.ldxp.cn）的调研结论：
+该平台**没有对外公开的官方 API 文档**，其接口均为依赖登录会话 + 阿里云 WAF 的站内接口，
+不具备可直接对接的开放 API 凭证体系。
 
-内置 16688 开放平台适配器，以及一个用于本地联调的 mock 平台。
-适配层是插件式的，按上面的步骤新增 adapter 即可，业务层无需改动。
+若要把它接入 kamihub，需要新增一个 adapter，并且只能走「模拟浏览器会话」的方式，
+存在随时失效的风险 —— 属于平台适配层预留的扩展位，但不建议作为主货源。
 
-</details>
+新增平台适配器的步骤（详见 `docs/API.md` 附录 D）：
 
-<details>
-<summary><b>卡密会不会被第三方看到？</b></summary>
+1. 在 `backend/internal/platform/<code>/` 下实现 `platform.Factory` 与 `platform.Client`
+   （`Ping / ListGoods / GetGoods / Quote / Purchase / QueryOrder`）
+2. 在启动时注册到 `platform.Registry`
+3. 后台「平台管理」新建平台时即可选到该适配器，凭证字段由 `CredentialFields()` 定义
 
-不会。提货页由服务端直接渲染，卡密不进任何前端 API；
-订单**列表**接口也不回传卡密明文，只有订单详情接口才有。
-
-</details>
-
-<details>
-<summary><b>为什么采购要分两个阶段？</b></summary>
-
-因为「下单」和「发货」的风险完全不同。
-下单阶段失败可以放心换货源（还没花钱）；
-发货阶段上游**已经扣款**，这时换货源等于重复购买，所以只标记状态等补偿。
-
-</details>
-
-<details>
-<summary><b>改了 ENCRYPTION_KEY 会怎样？</b></summary>
-
-已保存的平台凭证全部无法解密，需要在后台重新录入。
-所以设置好之后不要再改。
-
-</details>
-
-<details>
-<summary><b>能只用 API 不用后台吗？</b></summary>
-
-可以，但初次配置（平台、商品、货源）需要走后台。
-配置完成后，对接方只需要一个长期令牌 + `POST /api/orders/purchase`。
-
-</details>
-
----
-
-## 免责声明
-
-本项目是一个**技术中台**，用于把多个上游供货平台的接口统一起来、并管理提货链接。
-使用者需要自行确保：
-
-- 所对接的上游平台允许此类自动化调用
-- 所销售的商品合法合规，并遵守对应平台的条款
-- 自行承担采购、定价与售后责任
-
-作者不对使用本项目产生的任何商业损失或法律纠纷负责。
-
----
-
-## License
-
-[MIT](LICENSE)
+由于适配层已把「签名、错误分类、状态映射」收敛在 adapter 内部，
+业务层（路由、编排、提货）**不需要任何改动**。

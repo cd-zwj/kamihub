@@ -46,3 +46,10 @@ README.internal.md
 
 # ---------- 本地调试脚本 ----------
 _debug/
+
+# ---------- 部署残留与密钥副本（绝不入库）----------
+*.orig
+.env.production-do-not-use
+
+# 本地构建的 esbuild 临时目录
+.esbuild-tmp/
