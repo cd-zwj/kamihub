@@ -1,0 +1,86 @@
+[
+  {
+    "name": "商品列表（含空字符串）",
+    "controller": "goods",
+    "action": "list",
+    "plain": "POST\ngoods\nlist\napp_id=test_app_001&keywords=&nonce=AbCdEfGhIjKlMnOpQrStUvWxYz012345&page_no=1&page_size=20&source=&timestamp=1710000000",
+    "sign": "cf0031bd98e8afd3ee4439deb126de520d705d990873bd26265dc3dfe53c19cb"
+  },
+  {
+    "name": "空数组参与签名",
+    "controller": "complaint",
+    "action": "sendmessage",
+    "plain": "POST\ncomplaint\nsendmessage\napp_id=test_app_001&complaint_no=SC26031601&content=请重新发货&images=[]&nonce=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB&timestamp=1710000001",
+    "sign": "51aab23a2f529b3f4d2d0a87271b579464f537256e885b7ab2bcb0f580d5a0bb"
+  },
+  {
+    "name": "布尔值与数组",
+    "controller": "stocksecret",
+    "action": "setfirst",
+    "plain": "POST\nstocksecret\nsetfirst\napp_id=test_app_001&enabled=false&first=1&goods_no=G10001&ids=[10001,10002]&nonce=CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC&timestamp=1710000002",
+    "sign": "abcb4751c03ee67509909bc1aa03e706d08c653a5e8e1c2fec21bdba917ab85f"
+  },
+  {
+    "name": "数组顺序 3,1,2",
+    "controller": "stocksecret",
+    "action": "invalidate",
+    "plain": "POST\nstocksecret\ninvalidate\napp_id=test_app_001&goods_no=G10001&ids=[3,1,2]&invalid_reason=&nonce=DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD&timestamp=1710000003",
+    "sign": "d4947e88e0f7c31127d91792754f161aabc5d0233efbf196270aaae8a8fc144c"
+  },
+  {
+    "name": "数组顺序 1,2,3",
+    "controller": "stocksecret",
+    "action": "invalidate",
+    "plain": "POST\nstocksecret\ninvalidate\napp_id=test_app_001&goods_no=G10001&ids=[1,2,3]&invalid_reason=&nonce=DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD&timestamp=1710000003",
+    "sign": "486560d19f587df255686e53b1992e0fc17e14b3e9d2f18dc48bf2e255b2efb3"
+  },
+  {
+    "name": "数字类型（整数与小数）",
+    "controller": "goods",
+    "action": "create",
+    "plain": "POST\ngoods\ncreate\napp_id=test_app_001&limit_quantity=1&name=本地卡密商品&nonce=EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE&price=10.5&ratio=0.125&sort=0&timestamp=1710000004",
+    "sign": "95a94a2bb5d7072356b2cf495f6056ae08c9ae7681f8106982eac5785e9ee95b"
+  },
+  {
+    "name": "中文与特殊字符不转义",
+    "controller": "goods",
+    "action": "create",
+    "plain": "POST\ngoods\ncreate\napp_id=test_app_001&description=中文说明：包含 & < > 等字符&image=https://example.com/a.png?x=1&y=2&name=测试商品<卡密>&nonce=FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF&timestamp=1710000005",
+    "sign": "bb14722380833a7de5a95c262d9cbc5fec03023807300018b49514dc59d2c0bb"
+  },
+  {
+    "name": "嵌套对象键排序",
+    "controller": "purchase",
+    "action": "applycomplaint",
+    "plain": "POST\npurchase\napplycomplaint\napp_id=test_app_001&meta={\"a\":2,\"z\":1}&nonce=GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG&reason=卡密无法使用&timestamp=1710000006&trade_no=T2603161200001",
+    "sign": "e351631dd6016f8b73c5dba8f64cdf852a7d3538e28db3d1911eb87559fbdbd8"
+  },
+  {
+    "name": "驼峰路径转小写",
+    "controller": "stocksecret",
+    "action": "invalidateall",
+    "plain": "POST\nstocksecret\ninvalidateall\napp_id=test_app_001&goods_no=G10001&invalid_reason=违规&nonce=HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH&timestamp=1710000007",
+    "sign": "d7f8166a10728747e7c8fc5974ce47186e75fca2567ae8c50c9643068fc90e2e"
+  },
+  {
+    "name": "仅公共参数",
+    "controller": "merchant",
+    "action": "balance",
+    "plain": "POST\nmerchant\nbalance\napp_id=test_app_001&nonce=IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII&timestamp=1710000008",
+    "sign": "3b39054bf5bfd65faeea4baaa4173cfdb91eba6d78b5de48a98eed56525c8c97"
+  },
+  {
+    "name": "另一个 64 位密钥",
+    "controller": "order",
+    "action": "info",
+    "plain": "POST\norder\ninfo\napp_id=test_app_001&nonce=JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ&timestamp=1710000009&trade_no=T2603161200001",
+    "sign": "0f64e2aafebe1a9ff058ed611cf493b1c440eef55b713814b1e7197068e3b7d1"
+  },
+  {
+    "name": "订单列表（近 6 个月）",
+    "controller": "order",
+    "action": "list",
+    "plain": "POST\norder\nlist\napp_id=test_app_002&card_no=&keywords=&nonce=KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK&page_no=1&page_size=20&platform=&status=&timestamp=1710000010",
+    "sign": "81c3c00f37792a4fc6b5fde8b259a73661d567a19afcac72f7fc2201d1be84dd"
+  }
+]

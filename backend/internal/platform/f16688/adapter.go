@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"strconv"
 	"strings"
 	"time"
@@ -98,22 +99,39 @@ type envelope struct {
 	Data json.RawMessage `json:"data"`
 }
 
-// call 执行一次带签名的调用。
-func (c *Client) call(ctx context.Context, path, action string, biz map[string]any, out any) error {
+// call 执行一次带 HMAC-SHA256 签名的调用。
+//
+// 签名绑定「请求方法 + controller + action」，因此必须传入接口路径
+// （从中解析 controller/action），不能像旧 MD5 版那样只靠参数。
+//
+// 每次请求都会生成新的 nonce：官方要求 16~64 位、600 秒内不可重复，
+// 重复的 nonce 会被服务端拒绝，所以不能复用上一次的。
+func (c *Client) call(ctx context.Context, path string, biz map[string]any, out any) error {
+	controller, action := EndpointOf(path)
+	if controller == "" || action == "" {
+		return platform.NewFatal("接口路径不合法，无法解析 controller/action", path)
+	}
+
+	nonce, err := NewNonce()
+	if err != nil {
+		return platform.NewFatal("生成 nonce 失败", err.Error())
+	}
+
 	payload := map[string]any{
 		"app_id":    c.appID,
 		"timestamp": strconv.FormatInt(time.Now().Unix(), 10),
+		"nonce":     nonce,
 	}
 	for k, v := range biz {
-		// 业务参数不得覆盖公共参数
+		// 公共参数不得被业务参数覆盖，否则等于把签名钥匙交出去
 		switch k {
-		case "app_id", "timestamp", "sign", "sign_type":
+		case "app_id", "timestamp", "nonce", "sign", "sign_type":
 			continue
 		}
 		payload[k] = v
 	}
 
-	_, sign, err := BuildSign(payload, c.secret)
+	plain, sign, err := BuildSignature(SignMethod, controller, action, payload, c.secret)
 	if err != nil {
 		return platform.NewFatal("签名计算失败", err.Error())
 	}
@@ -124,7 +142,18 @@ func (c *Client) call(ctx context.Context, path, action string, biz map[string]a
 		return err
 	}
 
+	// 验签失败时把签名原文打进日志：
+	// 对接期最耗时的就是排查「为什么服务端说签名不对」，
+	// 有原文和 nonce 才能逐字段比对。
 	if env.Code != 1 {
+		if isSignError(env.Msg) {
+			slog.Warn("16688 签名被拒",
+				"path", path,
+				"controller", controller,
+				"action", action,
+				"nonce", nonce,
+				"sign_plain", plain)
+		}
 		return classify(env.Msg)
 	}
 	if out != nil && len(env.Data) > 0 {
@@ -133,6 +162,11 @@ func (c *Client) call(ctx context.Context, path, action string, biz map[string]a
 		}
 	}
 	return nil
+}
+
+// isSignError 判断错误是否与签名相关，用于决定要不要打详细日志
+func isSignError(msg string) bool {
+	return strings.Contains(msg, "签名") || strings.Contains(strings.ToLower(msg), "sign")
 }
 
 // classify 把 16688 的文本错误归类到统一的 FailKind。
@@ -176,7 +210,7 @@ type apiBalance struct {
 
 func (c *Client) Ping(ctx context.Context) (*platform.AccountInfo, error) {
 	var data apiBalance
-	if err := c.call(ctx, "/openApi/merchant/balance", "merchant.balance", nil, &data); err != nil {
+	if err := c.call(ctx, "/openApi/merchant/balance", nil, &data); err != nil {
 		return nil, err
 	}
 	return &platform.AccountInfo{
@@ -230,7 +264,7 @@ func (c *Client) ListGoods(ctx context.Context, req platform.ListGoodsRequest) (
 		Total int        `json:"total"`
 		List  []apiGoods `json:"list"`
 	}
-	if err := c.call(ctx, "/openApi/goods/list", "goods.list", biz, &data); err != nil {
+	if err := c.call(ctx, "/openApi/goods/list", biz, &data); err != nil {
 		return nil, err
 	}
 	out := &platform.ListGoodsResult{Total: data.Total, List: make([]platform.GoodsInfo, 0, len(data.List))}
@@ -242,7 +276,7 @@ func (c *Client) ListGoods(ctx context.Context, req platform.ListGoodsRequest) (
 
 func (c *Client) GetGoods(ctx context.Context, goodsNo string) (*platform.GoodsInfo, error) {
 	var data apiGoods
-	if err := c.call(ctx, "/openApi/goods/detail", "goods.detail", map[string]any{"goods_no": goodsNo}, &data); err != nil {
+	if err := c.call(ctx, "/openApi/goods/detail", map[string]any{"goods_no": goodsNo}, &data); err != nil {
 		return nil, err
 	}
 	info := data.toInfo()
@@ -268,7 +302,7 @@ type apiQuote struct {
 func (c *Client) Quote(ctx context.Context, req platform.QuoteRequest) (*platform.QuoteResult, error) {
 	var data apiQuote
 	biz := map[string]any{"goods_no": req.GoodsNo, "quantity": req.Quantity}
-	if err := c.call(ctx, "/openApi/purchase/quotePrice", "purchase.quote", biz, &data); err != nil {
+	if err := c.call(ctx, "/openApi/purchase/quotePrice", biz, &data); err != nil {
 		return nil, err
 	}
 	return &platform.QuoteResult{
@@ -369,7 +403,7 @@ func (c *Client) Purchase(ctx context.Context, req platform.PurchaseRequest) (*p
 		biz["remark"] = req.Remark
 	}
 	var data apiOrder
-	if err := c.call(ctx, "/openApi/purchase/create", "purchase.create", biz, &data); err != nil {
+	if err := c.call(ctx, "/openApi/purchase/create", biz, &data); err != nil {
 		return nil, err
 	}
 	return data.toResult(), nil
@@ -377,7 +411,7 @@ func (c *Client) Purchase(ctx context.Context, req platform.PurchaseRequest) (*p
 
 func (c *Client) QueryOrder(ctx context.Context, tradeNo string) (*platform.PurchaseResult, error) {
 	var data apiOrder
-	if err := c.call(ctx, "/openApi/purchase/query", "purchase.query", map[string]any{"trade_no": tradeNo}, &data); err != nil {
+	if err := c.call(ctx, "/openApi/purchase/query", map[string]any{"trade_no": tradeNo}, &data); err != nil {
 		return nil, err
 	}
 	return data.toResult(), nil
