@@ -1,11 +1,12 @@
-﻿import { useState } from 'react';
+import { useState } from 'react';
 import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { Avatar, Button, Dropdown, Form, Input, Layout, Menu, Modal, Space, Tag, Tooltip, message } from 'antd';
 import type { MenuProps } from 'antd';
 import {
-  ApiOutlined, AppstoreOutlined, BookOutlined, CrownOutlined, DashboardOutlined, FileSearchOutlined,
-  FileTextOutlined, ImportOutlined, KeyOutlined, LinkOutlined, LogoutOutlined, SafetyOutlined,
-  MoonOutlined, SettingOutlined, ShoppingCartOutlined, SunOutlined, TeamOutlined, ThunderboltOutlined, UserOutlined, WalletOutlined,
+  ApiOutlined, AppstoreOutlined, BookOutlined, CrownOutlined, CustomerServiceOutlined, DashboardOutlined,
+  FileSearchOutlined, FileTextOutlined, ImportOutlined, KeyOutlined, LinkOutlined, LogoutOutlined,
+  MoonOutlined, SafetyOutlined, SettingOutlined, ShoppingCartOutlined, SunOutlined, TeamOutlined,
+  ThunderboltOutlined, UserOutlined, WalletOutlined,
 } from '@ant-design/icons';
 import { api } from '@/api/client';
 import { useAuth } from '@/auth/AuthContext';
@@ -38,6 +39,9 @@ export default function AppLayout() {
       children: [
         { key: '/admin/orders', icon: <ShoppingCartOutlined />, label: <Link to="/admin/orders">订单</Link> },
         { key: '/admin/deliveries', icon: <LinkOutlined />, label: <Link to="/admin/deliveries">提货链接</Link> },
+        // 工单对所有员工开放：客服 / 运营都要能回买家咨询，
+        // 真正涉及金额的操作在工单内部另有权限判断。
+        { key: '/admin/tickets', icon: <CustomerServiceOutlined />, label: <Link to="/admin/tickets">工单</Link> },
         ...(isAdmin
           ? [
               {

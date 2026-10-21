@@ -28,6 +28,16 @@ type Buyer struct {
 	DisplayName string `gorm:"size:64" json:"display_name"`
 	Status      int    `gorm:"not null;default:1;index" json:"status"`
 
+	// IsGuest 匿名买家（不注册账号，用「邮箱 + 6 位安全密码」下单/查单）。
+	//
+	// 为什么要复用 buyers 表而不是新建表：orders.buyer_id 和
+	// payment_orders.buyer_id 都有外键指向 buyers(id)，支付/发货/退款
+	// 整条链路都以 buyer 为载体。匿名买家当成一种「没有登录凭证的账号」
+	// 复用同一张表，就能原样跑通支付与自动发货，不必改支付核心。
+	IsGuest bool `gorm:"not null;default:false;index" json:"is_guest"`
+	// GuestPinHash 匿名买家的 6 位安全密码（bcrypt）。非匿名买家为空。
+	GuestPinHash string `gorm:"size:255;not null;default:''" json:"-"`
+
 	// Balance 余额缓存。权威值以 wallet_transactions 累计为准，
 	// 这里冗余一份用于快速展示与下单前校验，任何写入都必须同事务更新。
 	Balance decimal.Decimal `gorm:"type:numeric(14,2);not null;default:0" json:"balance"`
@@ -207,6 +217,22 @@ const (
 	PaymentStatusClosed = "closed"
 )
 
+// 支付单用途。区分「给钱包充值」和「直接买某个商品」。
+//
+// 为什么要显式区分而不是根据 listing_id 是否为空推断：
+//
+//  1. 付款成功后的动作完全不同 —— 充值只入余额就结束，
+//     购卡还要接着自动下单发货，失败时的兜底文案也不一样。
+//  2. 历史数据（这张表已有的单子）必须继续按充值处理，
+//     因此新增列的默认值就是 recharge，老数据不需要回填。
+//  3. 排障时一眼能看出这笔钱当初是干什么用的。
+const (
+	// PaymentPurposeRecharge 钱包充值（默认，历史行为不变）
+	PaymentPurposeRecharge = "recharge"
+	// PaymentPurposeOrder 直接购买某商品：付款成功后自动下单发货
+	PaymentPurposeOrder = "order"
+)
+
 // PaymentOrder 一笔第三方支付（易支付）订单。
 //
 // 为什么需要独立一张表，而不是直接给 wallet_transactions 加字段：
@@ -249,6 +275,29 @@ type PaymentOrder struct {
 	// RawNotify 最近一次回调的原始参数（保留排障证据）
 	RawNotify string `gorm:"type:text" json:"raw_notify"`
 
+	// ---- 直付购卡（Purpose = order 时才有值）----
+	//
+	// 这一组列是纯新增，历史支付单全部是空值/默认值，
+	// 原有的「充值」链路完全不受影响（AutoMigrate 只加列，不动数据）。
+	//
+	// Purpose 支付用途：recharge=钱包充值（默认）/ order=直接购买某商品
+	Purpose string `gorm:"size:32;not null;default:recharge;index" json:"purpose"`
+	// ListingID 购买的商品 ID（Purpose=order 时有值）
+	ListingID *uint `gorm:"index" json:"listing_id,omitempty"`
+	// Quantity 购买数量（Purpose=order 时有值）
+	Quantity int `gorm:"not null;default:0" json:"quantity,omitempty"`
+	// PurchaseRequestID 自动下单用的幂等键，前端随请求生成。
+	// 同一个键重复下单不会重复扣款/重复采购，这是自动发货能安全重试的基础。
+	PurchaseRequestID string `gorm:"size:128;index" json:"purchase_request_id,omitempty"`
+	// OrderID 自动下单成功后关联的订单。非空即代表这笔支付已经发过货，
+	// 也是「付款成功但发货没跑完」时补跑幂等判断的依据。
+	OrderID *uint `gorm:"index" json:"order_id,omitempty"`
+	// AutoOrderError 自动下单失败的原因。买家看到的是通用文案，
+	// 这里存详细信息（上游报错等）供运营排障。
+	AutoOrderError string `gorm:"size:512" json:"auto_order_error,omitempty"`
+	// AutoOrderAt 最近一次尝试自动下单的时间
+	AutoOrderAt *time.Time `json:"auto_order_at,omitempty"`
+
 	Remark    string     `gorm:"size:255" json:"remark"`
 	ExpiresAt time.Time  `gorm:"not null;index" json:"expires_at"`
 	PaidAt    *time.Time `json:"paid_at"`
@@ -281,3 +330,57 @@ const (
 const (
 	WalletTypeOnlinePay = "online_pay" // 在线支付充值
 )
+
+// ---------------------------------------------------------------- 下游 API 密钥
+
+// 买家 API 密钥状态
+const (
+	// ApiKeyStatusEnabled 可用
+	ApiKeyStatusEnabled = 1
+	// ApiKeyStatusDisabled 已停用。保留记录而不是删除，
+	// 便于排查「这个下游以前调过什么」以及密钥轮换历史。
+	ApiKeyStatusDisabled = 0
+)
+
+// BuyerApiKey 买家自助签发的开放接口凭证（下游 / 代理用）。
+//
+// 为什么是 app_id + secret + HMAC 签名，而不是直接发一个 Bearer token：
+//
+//  1. **secret 只在调用方本地参与签名计算，永远不随请求发送。**
+//     Bearer token 一旦被抓包（网关日志、代理、中间层）就等于凭证泄漏；
+//     签名方案里即使抓到完整请求，也拿不到能再次签名的密钥。
+//  2. 每次请求带 timestamp + nonce，服务端校验时间窗并做去重，
+//     旧请求被原样重放会被直接拒掉。
+//  3. 一个买家可以签多个密钥（按下游 / 按系统区分），
+//     某一个泄漏时只停用那一个，不影响其它对接方。
+//
+// SecretEnc 存的是 AES-256-GCM 密文（crypto.Encrypt，密钥来自 ENCRYPTION_KEY），
+// 刻意不做哈希：买家需要能随时回看自己的 secret（与主流开放平台一致），
+// 一旦哈希就再也拿不回来了。明文只在创建 / 重置 / 主动查看时解密返回。
+type BuyerApiKey struct {
+	ID      uint `gorm:"primaryKey" json:"id"`
+	BuyerID uint `gorm:"not null;index" json:"buyer_id"`
+
+	// Name 备注名，便于买家区分「这个是给哪个下游 / 系统用的」
+	Name string `gorm:"size:64" json:"name"`
+
+	// AppID 公开的接入标识，会出现在每个请求里
+	AppID string `gorm:"size:64;uniqueIndex;not null" json:"app_id"`
+	// SecretEnc 加密后的签名密钥。json:"-" 保证它永远不会被顺手序列化出去
+	SecretEnc string `gorm:"size:512;not null" json:"-"`
+
+	Status int `gorm:"not null;default:1;index" json:"status"`
+
+	// ---- 调用统计：买家可据此自查，运营也能看出密钥是否在被使用 ----
+	CallCount  int64      `gorm:"not null;default:0" json:"call_count"`
+	LastUsedAt *time.Time `json:"last_used_at"`
+	LastUsedIP string     `gorm:"size:64" json:"last_used_ip"`
+
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+func (BuyerApiKey) TableName() string { return "buyer_api_keys" }
+
+// IsEnabled 密钥是否可用
+func (k *BuyerApiKey) IsEnabled() bool { return k.Status == ApiKeyStatusEnabled }

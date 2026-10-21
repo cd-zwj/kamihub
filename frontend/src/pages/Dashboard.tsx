@@ -1,469 +1,377 @@
-﻿import { useCallback, useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { Link } from 'react-router-dom';
+import { Button, Card, Col, Row, Tooltip, message } from 'antd';
 import {
-  Button,
-  Card,
-  Col,
-  Empty,
-  Progress,
-  Row,
-  Segmented,
-  Space,
-  Spin,
-  Statistic,
-  Table,
-  Tag,
-  Tooltip,
-  Typography,
-} from 'antd';
-import {
-  Area,
-  AreaChart,
-  Bar,
-  BarChart,
-  CartesianGrid,
-  Cell,
-  Legend,
-  Line,
-  LineChart,
-  Pie,
-  PieChart,
-  ResponsiveContainer,
-  Tooltip as RTooltip,
-  XAxis,
-  YAxis,
-} from 'recharts';
-import { ReloadOutlined, WarningOutlined } from '@ant-design/icons';
-import { api, toastError } from '@/api/client';
-import {
-  ORDER_STATUS_COLOR,
-  ORDER_STATUS_TEXT,
-  type DashboardCharts,
-  type DashboardStats,
-} from '@/api/types';
-import { CHART_COLORS } from '@/theme';
-import { money } from '@/utils/format';
-
-const { Text, Title } = Typography;
+  ArrowRightOutlined, CheckCircleOutlined, ExclamationCircleOutlined, LinkOutlined,
+  ReloadOutlined, ShoppingCartOutlined, ThunderboltOutlined, WarningOutlined,
+} from '@ant-design/icons';
+import { api } from '@/api/client';
+import { ORDER_STATUS_TEXT, type DashboardStats } from '@/api/types';
+import { yuan } from '@/utils/format';
+import { EmptyState, MetricBar, PageHeader, StatusTag, TableSkeleton, toneOf } from '@/admin/ui';
 
 /**
- * 统一空数据占位。
+ * 概览页（设计系统 §4.6 / §5 P1-6）。
  *
- * 图表最容易出的问题不是画错，是没数据时直接崩或画一片空白 ——
- * 运营看到空白分不清是「真没数据」还是「页面坏了」。
+ * 改版要点：
+ *  1) 4 个独立白卡 → 一整条 hero 指标条（视觉合并成一个元素，解决「4 张一样的卡」）
+ *  2) 加「需要关注」列表：把「平台异常 / 发货失败 / 额度告警」这类需要人动手的事
+ *     放到首屏最显眼处，而不是埋在表格里
+ *  3) 近 7 天趋势从表格换成手写 SVG 柱状图（不引依赖，一眼能看出趋势）
+ *  4) 订单状态分布：改 StatusTag + 修正跳转路径（改版前少了 /admin 前缀，
+ *     点进去会跳到买家商城，是个真 bug）
  */
-function ChartEmpty({ height = 240, text = '暂无数据' }: { height?: number; text?: string }) {
-  return (
-    <div style={{ height, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-      <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={text} />
-    </div>
-  );
-}
-
-/** 图表卡片外壳：统一标题与高度，避免每张图各写一套 */
-function ChartCard({
-  title,
-  hint,
-  extra,
-  children,
-}: {
-  title: string;
-  hint?: string;
-  extra?: React.ReactNode;
-  children: React.ReactNode;
-}) {
-  return (
-    <Card
-      size="small"
-      style={{ height: '100%' }}
-      extra={extra}
-      title={
-        <Space size={6}>
-          <span>{title}</span>
-          {hint && (
-            <Tooltip title={hint}>
-              <Text type="secondary" style={{ fontSize: 12, cursor: 'help', fontWeight: 400 }}>
-                ⓘ
-              </Text>
-            </Tooltip>
-          )}
-        </Space>
-      }
-    >
-      {children}
-    </Card>
-  );
-}
-
 export default function Dashboard() {
-  const [stats, setStats] = useState<DashboardStats | null>(null);
-  const [charts, setCharts] = useState<DashboardCharts | null>(null);
-  const [days, setDays] = useState(14);
+  const [data, setData] = useState<DashboardStats | null>(null);
   const [loading, setLoading] = useState(true);
 
-  const load = useCallback(async () => {
+  async function load() {
     setLoading(true);
     try {
-      // 两个接口并发：stats 给关键数字，charts 给 6 张图
-      const [s, c] = await Promise.all([api.stats(), api.charts(days)]);
-      setStats(s);
-      setCharts(c);
+      setData(await api.stats());
     } catch (e) {
-      toastError(e);
+      message.error(e instanceof Error ? e.message : '加载失败');
     } finally {
       setLoading(false);
     }
-  }, [days]);
+  }
 
   useEffect(() => {
     void load();
-  }, [load]);
+  }, []);
 
-  if (loading && !stats) {
-    return (
-      <div style={{ textAlign: 'center', padding: 80 }}>
-        <Spin size="large" />
-      </div>
-    );
-  }
-  if (!stats) return <Empty description="暂无数据" />;
-
-  const c = charts;
-  const daily = c?.daily ?? [];
-  const statusData = (c?.status_dist ?? []).map((s) => ({
-    status: s.status,
-    name: ORDER_STATUS_TEXT[s.status] ?? s.status,
-    value: s.count,
-  }));
+  // 后端无数据时这些集合可能是 null（Go 的 nil 切片会序列化成 null），
+  // 直接 .length / Object.keys 会抛 TypeError 导致整页白屏，这里统一兜底。
+  const trend = useMemo(() => data?.trend ?? [], [data]);
+  const platformStats = useMemo(() => data?.platform_stats ?? [], [data]);
+  const byStatus = useMemo(() => data?.orders?.by_status ?? {}, [data]);
 
   const limitPct =
-    stats.amount.daily_limit > 0
-      ? Math.min(100, Math.round((stats.amount.today / stats.amount.daily_limit) * 100))
+    data && data.amount.daily_limit > 0
+      ? Math.min(100, Math.round((data.amount.today / data.amount.daily_limit) * 100))
       : 0;
 
-  // days_left = -1 表示没有消耗数据、无法估算（不是「0 天」）
-  const daysLeft = c?.days_left ?? -1;
-  const lowBalance = daysLeft >= 0 && daysLeft < 7;
+  /** 需要人动手的事，按紧急度排序 */
+  const alerts = useMemo(() => {
+    if (!data) return [];
+    const list: { key: string; tone: 'danger' | 'warning' | 'info'; text: string; to: string }[] = [];
+    if (data.platforms.error > 0) {
+      list.push({
+        key: 'pf',
+        tone: 'danger',
+        text: `${data.platforms.error} 个平台连接异常，采购可能失败`,
+        to: '/admin/platforms',
+      });
+    }
+    if (limitPct >= 90) {
+      list.push({
+        key: 'limit',
+        tone: 'warning',
+        text: `今日采购额度已用 ${limitPct}%，接近上限后新订单会被拒绝`,
+        to: '/admin/settings',
+      });
+    }
+    const undelivered = data.orders.today - data.orders.today_delivered;
+    if (undelivered > 0) {
+      list.push({
+        key: 'undelivered',
+        tone: 'info',
+        text: `今日还有 ${undelivered} 单未完成发货`,
+        to: '/admin/orders?status=purchasing',
+      });
+    }
+    if (data.amount.daily_limit === 0) {
+      list.push({
+        key: 'nolimit',
+        tone: 'info',
+        text: '未设置每日采购上限，建议配置以控制资金风险',
+        to: '/admin/settings',
+      });
+    }
+    return list;
+  }, [data, limitPct]);
+
+  if (loading && !data) {
+    return (
+      <>
+        <PageHeader title="概览" desc="今日采购与发货情况" />
+        <Card size="small" variant="borderless">
+          <TableSkeleton rows={6} cols={4} />
+        </Card>
+      </>
+    );
+  }
+
+  if (!data) {
+    return (
+      <>
+        <PageHeader title="概览" desc="今日采购与发货情况" />
+        <Card variant="borderless">
+          <EmptyState
+            text="统计数据加载失败"
+            action={
+              <Button icon={<ReloadOutlined />} onClick={() => void load()}>
+                重试
+              </Button>
+            }
+          />
+        </Card>
+      </>
+    );
+  }
+
+  const deliveredRate =
+    data.orders.today > 0 ? Math.round((data.orders.today_delivered / data.orders.today) * 100) : 0;
 
   return (
-    <div>
-      <div
-        style={{
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          marginBottom: 14,
-          flexWrap: 'wrap',
-          gap: 8,
-        }}
-      >
-        <Title level={4} style={{ margin: 0 }}>
-          概览
-        </Title>
-        <Space wrap>
-          <Segmented
-            size="small"
-            value={days}
-            onChange={(v) => setDays(Number(v))}
-            options={[
-              { label: '近 7 天', value: 7 },
-              { label: '近 14 天', value: 14 },
-              { label: '近 30 天', value: 30 },
-            ]}
-          />
-          <Button size="small" icon={<ReloadOutlined />} onClick={() => void load()} loading={loading} />
-        </Space>
-      </div>
+    <>
+      <PageHeader
+        title="概览"
+        desc="今日采购与发货情况，需要处理的异常会集中列在下方"
+        extra={
+          <Button icon={<ReloadOutlined />} onClick={() => void load()} loading={loading}>
+            刷新
+          </Button>
+        }
+      />
 
-      {/* ---------------- 关键数字（比图重要，放最上） ---------------- */}
-      <Row gutter={[14, 14]}>
-        <Col xs={12} md={6}>
-          <Card size="small">
-            <Statistic title="今日订单" value={stats.orders.today} suffix={`/ ${stats.orders.total}`} />
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              已发货 {stats.orders.today_delivered}
-            </Text>
-          </Card>
-        </Col>
-        <Col xs={12} md={6}>
-          <Card size="small">
-            <Statistic title="今日采购额" value={money(stats.amount.today)} prefix="¥" />
-            <Progress
-              percent={limitPct}
-              size="small"
-              status={limitPct > 85 ? 'exception' : 'normal'}
-              format={() => (stats.amount.daily_limit > 0 ? `额度 ${limitPct}%` : '不限')}
-            />
-          </Card>
-        </Col>
-        <Col xs={12} md={6}>
-          <Card size="small">
-            <Statistic
-              title="可用余额合计"
-              value={money(c?.total_balance)}
-              prefix="¥"
-              valueStyle={{ color: lowBalance ? CHART_COLORS.danger : undefined }}
-            />
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              日均消耗 ¥{money(c?.avg_daily_spend)}
-            </Text>
-          </Card>
-        </Col>
-        <Col xs={12} md={6}>
-          <Card size="small">
-            <Statistic
-              title="预计可用天数"
-              value={daysLeft < 0 ? '—' : Math.floor(daysLeft)}
-              suffix={daysLeft < 0 ? '' : '天'}
-              prefix={lowBalance ? <WarningOutlined /> : undefined}
-              valueStyle={{ color: lowBalance ? CHART_COLORS.danger : CHART_COLORS.success }}
-            />
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              {daysLeft < 0
-                ? '暂无消耗数据'
-                : lowBalance
-                  ? '余额偏低，建议尽快充值'
-                  : '按日均消耗估算'}
-            </Text>
-          </Card>
-        </Col>
-      </Row>
+      {/* ── 核心指标条 ── */}
+      <MetricBar
+        items={[
+          {
+            label: '今日订单',
+            value: data.orders.today,
+            hint: `已发货 ${data.orders.today_delivered} 单 · 发货率 ${deliveredRate}%`,
+            tone: deliveredRate >= 95 ? 'success' : deliveredRate >= 80 ? 'warning' : 'danger',
+            icon: <ShoppingCartOutlined />,
+          },
+          {
+            label: '今日采购金额',
+            value: yuan(data.amount.today),
+            hint:
+              data.amount.daily_limit > 0
+                ? `额度 ${yuan(data.amount.daily_limit)} · 剩余 ${yuan(data.amount.daily_remaining)}`
+                : '未设置每日上限',
+            tone: limitPct >= 90 ? 'danger' : limitPct >= 70 ? 'warning' : undefined,
+            icon: <ThunderboltOutlined />,
+          },
+          {
+            label: '平台连接',
+            value: `${data.platforms.enabled} / ${data.platforms.total}`,
+            hint: data.platforms.error > 0 ? `${data.platforms.error} 个异常` : '全部正常',
+            tone: data.platforms.error > 0 ? 'danger' : 'success',
+            icon: <CheckCircleOutlined />,
+          },
+          {
+            label: '有效提货链接',
+            value: data.deliveries.active,
+            hint: `已过期 ${data.deliveries.expired} 个`,
+            icon: <LinkOutlined />,
+          },
+          {
+            label: '在售商品',
+            value: `${data.goods?.on ?? 0} / ${data.goods?.total ?? 0}`,
+            hint: '商品与货源',
+            icon: <WarningOutlined />,
+          },
+        ]}
+      />
 
-      {/* ---------------- C1 订单量与销售额 ---------------- */}
-      <Row gutter={[14, 14]} style={{ marginTop: 14 }}>
-        <Col xs={24} lg={16}>
-          <ChartCard
-            title="订单量与销售额趋势"
-            hint="销售额只统计 C 端实付；后台手工单没有买家实付，只计入订单量"
+      {/* ── 需要关注 ── */}
+      {alerts.length > 0 && (
+        <div className="a-attention">
+          <div className="a-attention-title">
+            <ExclamationCircleOutlined /> 需要关注
+          </div>
+          {alerts.map((a) => (
+            <Link key={a.key} to={a.to} className="a-attention-item">
+              <StatusTag tone={a.tone} dot>
+                {a.tone === 'danger' ? '异常' : a.tone === 'warning' ? '注意' : '提示'}
+              </StatusTag>
+              <span className="a-attention-text">{a.text}</span>
+              <ArrowRightOutlined className="a-attention-arrow" />
+            </Link>
+          ))}
+        </div>
+      )}
+
+      <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
+        {/* ── 近 7 天趋势 ── */}
+        <Col xs={24} lg={15}>
+          <Card
+            variant="borderless"
+            title="近 7 天订单趋势"
+            extra={<span className="a-card-extra">柱高 = 订单数 · 深色 = 已发货</span>}
           >
-            {daily.length > 0 ? (
-              <ResponsiveContainer width="100%" height={260}>
-                <LineChart data={daily} margin={{ top: 8, right: 8, left: -12, bottom: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.2)" />
-                  <XAxis dataKey="day" tick={{ fontSize: 11 }} />
-                  <YAxis yAxisId="left" tick={{ fontSize: 11 }} />
-                  <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11 }} />
-                  <RTooltip
-                    formatter={(v, n) => (n === '销售额' ? [`¥${money(Number(v))}`, n] : [v, n]) as [string, string]}
-                  />
-                  <Legend wrapperStyle={{ fontSize: 12 }} />
-                  <Line
-                    yAxisId="left"
-                    type="monotone"
-                    dataKey="orders"
-                    name="订单量"
-                    stroke={CHART_COLORS.primary}
-                    strokeWidth={2}
-                    dot={false}
-                  />
-                  <Line
-                    yAxisId="right"
-                    type="monotone"
-                    dataKey="gmv"
-                    name="销售额"
-                    stroke={CHART_COLORS.success}
-                    strokeWidth={2}
-                    dot={false}
-                  />
-                </LineChart>
-              </ResponsiveContainer>
+            {trend.length === 0 ? (
+              <EmptyState text="暂无数据" />
             ) : (
-              <ChartEmpty height={260} text="这段时间还没有订单" />
+              <TrendChart data={trend} />
             )}
-          </ChartCard>
+          </Card>
         </Col>
 
-        {/* ---------------- C2 订单状态分布 ---------------- */}
-        <Col xs={24} lg={8}>
-          <ChartCard title="订单状态分布" hint="失败占比异常升高通常意味着上游或余额出了问题">
-            {statusData.length > 0 ? (
-              <ResponsiveContainer width="100%" height={260}>
-                <PieChart>
-                  <Pie
-                    data={statusData}
-                    dataKey="value"
-                    nameKey="name"
-                    innerRadius={52}
-                    outerRadius={82}
-                    paddingAngle={2}
-                  >
-                    {statusData.map((s) => (
-                      <Cell key={s.status} fill={ORDER_STATUS_COLOR[s.status] ?? CHART_COLORS.neutral} />
-                    ))}
-                  </Pie>
-                  <RTooltip formatter={(v, n) => [`${v} 单`, n] as [string, string]} />
-                  <Legend wrapperStyle={{ fontSize: 12 }} />
-                </PieChart>
-              </ResponsiveContainer>
+        {/* ── 平台分布 ── */}
+        <Col xs={24} lg={9}>
+          <Card variant="borderless" title="各平台订单分布">
+            {platformStats.length === 0 ? (
+              <EmptyState text="还没有配置平台" />
             ) : (
-              <ChartEmpty height={260} text="还没有订单" />
-            )}
-          </ChartCard>
-        </Col>
-      </Row>
-
-      {/* ---------------- C5 每日消耗（最值钱的图） ---------------- */}
-      <Row gutter={[14, 14]} style={{ marginTop: 14 }}>
-        <Col xs={24} lg={16}>
-          <ChartCard
-            title="每日采购消耗"
-            hint="把「余额告警」变成「看得见的趋势」：消耗加速时，提前几天就知道要充值"
-            extra={daysLeft >= 0 ? <Tag color={lowBalance ? 'red' : 'green'}>预计 {Math.floor(daysLeft)} 天</Tag> : null}
-          >
-            {(c?.spend_trend ?? []).length > 0 ? (
-              <ResponsiveContainer width="100%" height={240}>
-                <AreaChart data={c?.spend_trend ?? []} margin={{ top: 8, right: 8, left: -12, bottom: 0 }}>
-                  <defs>
-                    <linearGradient id="spendFill" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor={CHART_COLORS.primary} stopOpacity={0.28} />
-                      <stop offset="100%" stopColor={CHART_COLORS.primary} stopOpacity={0.02} />
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.2)" />
-                  <XAxis dataKey="day" tick={{ fontSize: 11 }} />
-                  <YAxis tick={{ fontSize: 11 }} />
-                  <RTooltip formatter={(v) => [`¥${money(Number(v))}`, '消耗'] as [string, string]} />
-                  <Area
-                    type="monotone"
-                    dataKey="spend"
-                    stroke={CHART_COLORS.primary}
-                    strokeWidth={2}
-                    fill="url(#spendFill)"
-                  />
-                </AreaChart>
-              </ResponsiveContainer>
-            ) : (
-              <ChartEmpty height={240} text="这段时间还没有采购消耗" />
-            )}
-          </ChartCard>
-        </Col>
-
-        {/* ---------------- C4 各上游成功率 ---------------- */}
-        <Col xs={24} lg={8}>
-          <ChartCard title="各上游成功率" hint="成功率持续下降的上游要尽快切走">
-            {(c?.platform_rates ?? []).length > 0 ? (
-              <div style={{ maxHeight: 240, overflowY: 'auto' }}>
-                {(c?.platform_rates ?? []).slice(0, 8).map((p) => {
-                  const pct = Math.round(p.success_rate * 100);
+              <div className="a-rank">
+                {platformStats.map((p) => {
+                  const pct =
+                    p.total > 0 ? Math.round((p.delivered / p.total) * 100) : 0;
                   return (
-                    <div key={p.platform_id} style={{ marginBottom: 10 }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
-                        <Text ellipsis style={{ maxWidth: 130 }}>
-                          {p.name}
-                        </Text>
-                        <Text type="secondary">
-                          {p.delivered}/{p.total}
-                        </Text>
+                    <div className="a-rank-row" key={p.platform_id}>
+                      <div className="a-rank-label">
+                        <span className="a-rank-name">{p.name}</span>
+                        <span className="a-rank-num a-num">
+                          {p.delivered} / {p.total}
+                        </span>
                       </div>
-                      <Progress
-                        percent={pct}
-                        size="small"
-                        status={pct < 80 ? 'exception' : 'success'}
-                        format={(v) => `${v}%`}
-                      />
+                      <div className="a-rank-track">
+                        <div
+                          className="a-rank-fill"
+                          style={{
+                            width: `${pct}%`,
+                            background: pct >= 90 ? 'var(--a-success)' : pct >= 70 ? 'var(--a-warning)' : 'var(--a-danger)',
+                          }}
+                        />
+                      </div>
                     </div>
                   );
                 })}
               </div>
-            ) : (
-              <ChartEmpty height={240} text="这段时间还没有上游订单" />
             )}
-          </ChartCard>
+          </Card>
         </Col>
       </Row>
 
-      {/* ---------------- C3 货源成本对比 + C6 商品销量 TOP ---------------- */}
-      <Row gutter={[14, 14]} style={{ marginTop: 14 }}>
-        <Col xs={24} lg={14}>
-          <ChartCard title="货源成本对比" hint="同一件商品挂多个货源时，这里能直接看出该切哪家">
-            {(c?.supply_costs ?? []).length > 0 ? (
-              <ResponsiveContainer width="100%" height={300}>
-                <BarChart
-                  data={(c?.supply_costs ?? []).slice(0, 12).map((s) => ({
-                    ...s,
-                    label: `${s.platform.slice(0, 6)} ${s.goods_no.slice(-4)}`,
-                  }))}
-                  layout="vertical"
-                  margin={{ top: 4, right: 16, left: 8, bottom: 0 }}
-                >
-                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.2)" />
-                  <XAxis type="number" tick={{ fontSize: 11 }} />
-                  <YAxis type="category" dataKey="label" width={96} tick={{ fontSize: 10 }} />
-                  <RTooltip
-                    formatter={(v) => [`¥${money(Number(v))}`, '成本价'] as [string, string]}
-                    labelFormatter={(l) => `货源 ${l}`}
-                  />
-                  <Bar dataKey="cost_price" fill={CHART_COLORS.primary} radius={[0, 4, 4, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
-            ) : (
-              <ChartEmpty height={300} text="还没有配置成本价的货源" />
-            )}
-          </ChartCard>
-        </Col>
-
-        <Col xs={24} lg={10}>
-          <ChartCard title="商品销量 TOP 10" hint="按已发货订单数排序，用来决定优先补哪个货">
-            {(c?.top_goods ?? []).length > 0 ? (
-              <ResponsiveContainer width="100%" height={300}>
-                <BarChart
-                  data={(c?.top_goods ?? []).map((g) => ({
-                    ...g,
-                    label: g.name.length > 8 ? `${g.name.slice(0, 8)}…` : g.name,
-                  }))}
-                  margin={{ top: 4, right: 8, left: -16, bottom: 0 }}
-                >
-                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.2)" />
-                  <XAxis
-                    dataKey="label"
-                    tick={{ fontSize: 10 }}
-                    interval={0}
-                    angle={-18}
-                    textAnchor="end"
-                    height={52}
-                  />
-                  <YAxis tick={{ fontSize: 11 }} />
-                  <RTooltip formatter={(v) => [`${v} 单`, '销量'] as [string, string]} />
-                  <Bar dataKey="orders" fill={CHART_COLORS.success} radius={[4, 4, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
-            ) : (
-              <ChartEmpty height={300} text="这段时间还没有销量" />
-            )}
-          </ChartCard>
-        </Col>
-      </Row>
-
-      {/* ---------------- 各平台余额明细 ---------------- */}
-      <Card size="small" title="各平台余额" style={{ marginTop: 14 }}>
-        {(c?.balances ?? []).length > 0 ? (
-          <Table
-            rowKey="platform_id"
-            size="small"
-            pagination={false}
-            scroll={{ x: 'max-content' }}
-            dataSource={c?.balances ?? []}
-            columns={[
-              { title: '平台', dataIndex: 'name' },
-              {
-                title: '状态',
-                width: 100,
-                render: (_, r) => (r.enabled ? <Tag color="green">启用</Tag> : <Tag>停用</Tag>),
-              },
-              {
-                title: '余额',
-                width: 140,
-                render: (_, r) => (
-                  <Text strong style={{ color: r.balance < 500 ? CHART_COLORS.danger : undefined }}>
-                    ¥{money(r.balance)}
-                  </Text>
-                ),
-              },
-            ]}
-          />
+      {/* ── 订单状态分布 ── */}
+      <Card variant="borderless" title="订单状态分布" style={{ marginTop: 16 }}>
+        {Object.keys(byStatus).length === 0 ? (
+          <EmptyState text="暂无订单" />
         ) : (
-          <ChartEmpty height={120} text="还没有配置上游平台" />
+          <div className="a-status-grid">
+            {Object.entries(byStatus).map(([status, count]) => (
+              <Tooltip key={status} title={`查看「${ORDER_STATUS_TEXT[status] || status}」订单`}>
+                <Link className="a-status-cell" to={`/admin/orders?status=${status}`}>
+                  <StatusTag tone={toneOf(status)} dot>
+                    {ORDER_STATUS_TEXT[status] || status}
+                  </StatusTag>
+                  <span className="a-status-count a-num">{count}</span>
+                </Link>
+              </Tooltip>
+            ))}
+          </div>
         )}
       </Card>
+    </>
+  );
+}
+
+/* ────────────────────────── 手写 SVG 柱状图 ────────────────────────── */
+
+/**
+ * 近 7 天订单趋势。
+ *
+ * 为什么手写 SVG 而不引 ECharts/Recharts：
+ * 只需要「7 根柱子 + 悬停数值」，引一个 300KB 的图表库不值当。
+ * 这段代码控制在 60 行内，后续要加折线/堆叠也容易。
+ */
+function TrendChart({ data }: { data: { day: string; total: number; delivered: number }[] }) {
+  const [hover, setHover] = useState<number | null>(null);
+  const max = Math.max(1, ...data.map((d) => d.total));
+
+  // 用真实像素坐标绘制，不用 viewBox 缩放。
+  // 之前用 viewBox="0 0 100 H" + preserveAspectRatio="none"，
+  // 横向被拉伸 9 倍多，柱子宽度从 26px 变成 ~230px 直接糊出容器。
+  // 容器宽度靠 CSS 撑满，SVG 宽度 100% + 固定像素坐标即可自适应。
+  const W = 700;
+  const H = 176;
+  const padTop = 12;
+  const labelH = 22;
+  const plotH = H - padTop - labelH;
+  const slot = W / data.length;
+  const barW = Math.min(34, slot * 0.42);
+
+  return (
+    <div className="a-chart">
+      <svg
+        viewBox={`0 0 ${W} ${H}`}
+        preserveAspectRatio="xMidYMid meet"
+        className="a-chart-svg"
+        role="img"
+        aria-label="近 7 天订单趋势柱状图"
+      >
+        {/* 横向参考线：0 / 50% / 100% */}
+        {[0, 0.5, 1].map((r) => (
+          <line
+            key={r}
+            x1="0"
+            x2={W}
+            y1={padTop + (1 - r) * plotH}
+            y2={padTop + (1 - r) * plotH}
+            stroke="var(--a-line)"
+            strokeWidth="1"
+          />
+        ))}
+        {data.map((d, i) => {
+          const h = Math.max(3, (d.total / max) * plotH);
+          const hd = d.total > 0 ? (d.delivered / d.total) * h : 0;
+          const x = i * slot + (slot - barW) / 2;
+          const y = padTop + plotH - h;
+          const dim = hover !== null && hover !== i;
+          return (
+            <g
+              key={d.day}
+              onMouseEnter={() => setHover(i)}
+              onMouseLeave={() => setHover(null)}
+              style={{ opacity: dim ? 0.35 : 1, transition: 'opacity .12s' }}
+            >
+              {/* 总单量（浅底） */}
+              <rect x={x} y={y} width={barW} height={h} rx="3" fill="var(--a-primary-weak)" />
+              {/* 已发货（实色叠加，从底部对齐） */}
+              <rect
+                x={x}
+                y={padTop + plotH - hd}
+                width={barW}
+                height={hd}
+                rx="3"
+                fill={d.delivered === d.total ? 'var(--a-primary)' : '#5B82F5'}
+              />
+              {/* 悬停热区：整列，比柱子好点中 */}
+              <rect x={i * slot} y="0" width={slot} height={H} fill="transparent" style={{ cursor: 'default' }} />
+            </g>
+          );
+        })}
+      </svg>
+
+      <div className="a-chart-x">
+        {data.map((d, i) => (
+          <div
+            className={`a-chart-x-item${hover === i ? ' is-hover' : ''}`}
+            key={d.day}
+            onMouseEnter={() => setHover(i)}
+            onMouseLeave={() => setHover(null)}
+          >
+            <span>{d.day.slice(5)}</span>
+          </div>
+        ))}
+      </div>
+
+      {/* 数值用 DOM 画，避免 SVG 里文字被缩放变形 */}
+      {hover !== null && (
+        <div className="a-chart-tip" style={{ left: `${((hover + 0.5) / data.length) * 100}%` }}>
+          <strong>{data[hover].day}</strong>
+          <span>
+            订单 <b>{data[hover].total}</b>
+          </span>
+          <span>
+            已发货 <b>{data[hover].delivered}</b>
+          </span>
+        </div>
+      )}
     </div>
   );
 }

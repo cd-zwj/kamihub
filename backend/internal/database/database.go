@@ -88,6 +88,15 @@ func Migrate(db *gorm.DB) error {
 		// 第三方支付（易支付）订单，同样是纯新增表
 		&models.PaymentOrder{},
 
+		// 买家自助签发的开放接口凭证（下游 / 代理签名调用），纯新增表
+		&models.BuyerApiKey{},
+		// 买家工单（售后咨询），纯新增表，不影响任何既有数据
+		&models.Ticket{},
+		&models.TicketMessage{},
+		// 商品数量阶梯折扣（买满 N 件打 M 折），纯新增表。
+		// 与下面 price_tiers（按买家身份档位）是两套正交机制，互不覆盖。
+		&models.ListingTier{},
+
 		// ---------- 迭代 1：运维地基 ----------
 		// 全部是新增表，不修改任何现有表结构。
 		// worker_task_runs 记录定时任务执行；reconcile_diffs 记录对账差异；

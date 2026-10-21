@@ -84,6 +84,22 @@ type ShopListing struct {
 	StockUpdatedAt *time.Time `json:"stock_updated_at"`
 	// StockMode 1=自有卡密 2=上游代发 3=混合，供前端展示不同的文案
 	StockMode int `json:"stock_mode"`
+
+	// Tiers 阶梯折扣档位（按 min_qty 升序）。
+	// 前端用它在商品页展示「10 个起 9 折」这类提示，
+	// 以及算出「再买 N 件可享受折扣」的引导。
+	Tiers []TierView `json:"tiers,omitempty"`
+}
+
+// TierView 阶梯折扣的对外视图。
+//
+// 除原始配置外，额外算出**该档折后单价**直接给前端：
+// 让前端不必重复实现一遍折扣计算，避免两边算出不同结果。
+type TierView struct {
+	MinQty    int             `json:"min_qty"`
+	Discount  int             `json:"discount"`
+	UnitPrice decimal.Decimal `json:"unit_price"`
+	Label     string          `json:"label"`
 }
 
 // supplyStock 某个商品在上游侧的库存缓存汇总。
@@ -207,6 +223,18 @@ func (s *ListingService) GetForShop(ctx context.Context, id uint) (*ShopListing,
 
 // toShopListings 把内部模型转成 C 端视图，并补上库存。
 func (s *ListingService) toShopListings(ctx context.Context, rows []models.Listing) ([]ShopListing, error) {
+	// 批量取阶梯折扣，避免逐条查询（列表页可能有几十个商品）
+	ids := make([]uint, 0, len(rows))
+	for i := range rows {
+		ids = append(ids, rows[i].ID)
+	}
+	tierMap, terr := s.tiersFor(ctx, ids)
+	if terr != nil {
+		// 折扣读不出来不该让整个商城挂掉，降级为不展示档位
+		slog.Warn("批量读取阶梯折扣失败，本次不展示档位", "error", terr.Error())
+		tierMap = nil
+	}
+
 	out := make([]ShopListing, 0, len(rows))
 
 	// 一次性把上游货源库存缓存查出来（避免 N+1）
@@ -241,12 +269,40 @@ func (s *ListingService) toShopListings(ctx context.Context, rows []models.Listi
 		if r.MinQty <= 0 {
 			item.MinQty = 1
 		}
+		// 生效单次上限：listing 层与 goods 层都要满足，取较小者（0 表示不限）。
+		//
+		// 必须算「生效值」再给前端：限购分别配在 listing.max_qty 和
+		// goods.max_quantity 两个地方，只返回 listing 层的值会出现
+		// 「前端显示不限、买家能选多件、下单时才被 goods 层拦下」的情况，
+		// 买家看到的就是「发货失败、钱退回余额」，而运营查上游又有货。
+		goodsMax := 0
+		if r.Goods != nil {
+			item.StockMode = r.Goods.StockMode
+			goodsMax = r.Goods.MaxQuantity
+		}
+		item.MaxQty = effectiveMaxQty(r.MaxQty, goodsMax)
+
+		// 数量阶梯折扣：把每档的折后单价一并算好给前端，
+		// 前端不再重复实现一遍折扣计算，避免两边算出不同结果。
+		if tiers := tierMap[r.ID]; len(tiers) > 0 {
+			item.Tiers = make([]TierView, 0, len(tiers))
+			for _, t := range tiers {
+				item.Tiers = append(item.Tiers, TierView{
+					MinQty:    t.MinQty,
+					Discount:  t.Discount,
+					UnitPrice: t.UnitPriceFor(r.SalePrice),
+					Label:     t.Label,
+				})
+			}
+		}
+
+		// goods 被删但上架条目还在：库存按未知处理，不阻断整个列表
 		if r.Goods == nil {
 			out = append(out, item)
 			continue
 		}
-		item.StockMode = r.Goods.StockMode
 
+		// 自有卡密池的可用张数（下面算库存要用）
 		var pool int64
 		if r.Goods.UsesCardPool() && s.cards != nil {
 			n, cerr := s.cards.CountAvailable(ctx, r.GoodsID)
@@ -276,10 +332,34 @@ func (s *ListingService) toShopListings(ctx context.Context, rows []models.Listi
 				item.Stock += pool
 			}
 		}
-
 		out = append(out, item)
 	}
 	return out, nil
+}
+
+// effectiveMaxQty 计算买家「一次最多能买多少件」。
+//
+// listing.max_qty 与 goods.max_quantity 都遵循「0 表示不限」的约定，
+// 生效值取两者中较小的非零值；两边都没限制时返回 0（不限）。
+//
+// 之所以要有这个函数：限购实际上分散在两个层级上配置，
+// 买家能买多少必须以「两个限制同时满足」为准，否则前端展示与
+// 后端校验就会打架（前端说能买 2 件，后端说最多 1 件）。
+func effectiveMaxQty(listingMax, goodsMax int) int {
+	switch {
+	case listingMax <= 0:
+		// listing 不限 → 由 goods 决定；goods 也<=0 时返回 0/负数，统一按 0 处理
+		if goodsMax <= 0 {
+			return 0
+		}
+		return goodsMax
+	case goodsMax <= 0:
+		return listingMax
+	case listingMax < goodsMax:
+		return listingMax
+	default:
+		return goodsMax
+	}
 }
 
 // ---------------------------------------------------------------- 对后台
@@ -671,26 +751,39 @@ func (s *ListingService) BuyerQuoteFor(
 		}
 	}
 
-	// ---- 档位专价 ----
+	// ---- 价格计算：数量阶梯折扣 → 代理档位专价 ----
 	//
-	// buyerID=0 或 pricing 未装配 → 直接走原价，与改造前完全一致。
+	// 两套折扣是正交的两件事，按顺序叠加：
+	//   1) 数量阶梯（listing_tiers）：运营配的「买满 N 件打 M 折」，属于公开促销
+	//   2) 代理档位（price_tiers）：买家身份档位的专价率，带保底逐级回落
+	//
+	// 保底校验放在最后一道（PricingService.Quote 内部），
+	// 因此叠加后的成交价不会跌破成本线；buyerID=0 或 pricing 未装配时
+	// 只走数量折扣，行为与「阶梯专价总开关关闭」完全一致。
 	unitPrice := row.SalePrice
+	if tier := s.matchTier(ctx, row.ID, quantity); tier != nil {
+		unitPrice = tier.UnitPriceFor(row.SalePrice)
+	}
+
 	if buyerID > 0 && s.pricing != nil {
 		tier := s.buyerTier(ctx, buyerID)
 		if tier != "" && tier != models.TierRetail {
-			q, qerr := s.pricing.Quote(ctx, &row, tier)
+			// 档位定价以「数量折扣后的单价」为基数，两套折扣因此叠加而不冲突。
+			base := row
+			base.SalePrice = unitPrice
+			q, qerr := s.pricing.Quote(ctx, &base, tier)
 			if qerr != nil {
-				// 档位算价失败不能让下单失败：退回原价（对买家只多不少），
+				// 档位算价失败不能让下单失败：退回数量折扣价（对买家只多不少），
 				// 并留日志等运营发现。价格算错是内部问题，不该由买家承担。
-				slog.Error("档位报价失败，退回零售价",
+				slog.Error("档位报价失败，退回数量折扣价",
 					"buyer_id", buyerID, "listing_id", listingID, "error", qerr.Error())
-			} else if q.FellBack {
-				slog.Info("档位专价触发保底回落",
-					"buyer_id", buyerID, "listing_id", listingID,
-					"requested", q.RequestedTier, "effective", q.TierCode,
-					"reason", q.Reason)
-				unitPrice = q.UnitPrice
 			} else {
+				if q.FellBack {
+					slog.Info("档位专价触发保底回落",
+						"buyer_id", buyerID, "listing_id", listingID,
+						"requested", q.RequestedTier, "effective", q.TierCode,
+						"reason", q.Reason)
+				}
 				unitPrice = q.UnitPrice
 			}
 		}
@@ -698,6 +791,12 @@ func (s *ListingService) BuyerQuoteFor(
 
 	// 金额 = 单价 × 数量，四舍五入到分
 	total := unitPrice.Mul(decimal.NewFromInt(int64(quantity))).Round(2)
+
+	// 把成交单价写回返回结构：调用方（ShopQuote、支付服务）拿它
+	// 显示「单价 × 数量 = 合计」时才能自洽。
+	// row 只是本次查询的内存副本，不会影响库里的商品原价。
+	row.SalePrice = unitPrice
+
 	return &row, total, nil
 }
 
@@ -711,6 +810,139 @@ func (s *ListingService) buyerTier(ctx context.Context, buyerID uint) string {
 		return models.TierRetail
 	}
 	return tier
+}
+
+// matchTier 找出该数量命中的最高档位；没有命中返回 nil。
+//
+// 多档重叠时取 MinQty 最大的那一档（买得越多越便宜），
+// 排序在 SQL 里做掉，避免在 Go 里再排一次。
+func (s *ListingService) matchTier(ctx context.Context, listingID uint, quantity int) *models.ListingTier {
+	var tier models.ListingTier
+	err := s.db.WithContext(ctx).
+		Where("listing_id = ? AND enabled = ? AND min_qty <= ?", listingID, true, quantity).
+		Order("min_qty DESC").
+		First(&tier).Error
+	if err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			slog.Warn("读取阶梯折扣失败，按原价结算",
+				"listing_id", listingID, "error", err.Error())
+		}
+		return nil
+	}
+	return &tier
+}
+
+// BaseSalePrice 取商品的原始售价（未打折）。
+//
+// 给「展示各档折后单价」用：命中档位后的 unit_price 是折后值，
+// 拿它再去乘折扣会变成折上折，必须用原价来算。
+func (s *ListingService) BaseSalePrice(ctx context.Context, listingID uint) (decimal.Decimal, error) {
+	var row struct {
+		SalePrice decimal.Decimal
+	}
+	err := s.db.WithContext(ctx).Model(&models.Listing{}).
+		Select("sale_price").
+		Where("id = ?", listingID).
+		Take(&row).Error
+	if err != nil {
+		return decimal.Zero, err
+	}
+	return row.SalePrice, nil
+}
+
+// ListTiers 取某商品的全部阶梯档位（按 min_qty 升序，便于展示）。
+func (s *ListingService) ListTiers(ctx context.Context, listingID uint) ([]models.ListingTier, error) {
+	var rows []models.ListingTier
+	err := s.db.WithContext(ctx).
+		Where("listing_id = ?", listingID).
+		Order("min_qty ASC").
+		Find(&rows).Error
+	return rows, err
+}
+
+// tiersFor 批量取多个商品的档位，避免列表页 N+1 查询。
+func (s *ListingService) tiersFor(ctx context.Context, listingIDs []uint) (map[uint][]models.ListingTier, error) {
+	out := make(map[uint][]models.ListingTier, len(listingIDs))
+	if len(listingIDs) == 0 {
+		return out, nil
+	}
+	var rows []models.ListingTier
+	if err := s.db.WithContext(ctx).
+		Where("listing_id IN ? AND enabled = ?", listingIDs, true).
+		Order("min_qty ASC").
+		Find(&rows).Error; err != nil {
+		return out, err
+	}
+	for _, r := range rows {
+		out[r.ListingID] = append(out[r.ListingID], r)
+	}
+	return out, nil
+}
+
+// TierInput 后台保存阶梯档位
+type TierInput struct {
+	MinQty   int    `json:"min_qty"`
+	Discount int    `json:"discount"`
+	Label    string `json:"label"`
+	Enabled  *bool  `json:"enabled"`
+}
+
+// ReplaceTiers 用一批新档位整体替换某商品的阶梯配置。
+//
+// 用「整体替换」而不是逐条增删改：
+// 运营在后台就是一个表格编辑完点保存，整体替换语义最直接，
+// 也不会出现删档删漏、残留脏数据的情况。整个过程在事务里完成。
+func (s *ListingService) ReplaceTiers(ctx context.Context, listingID uint, items []TierInput) error {
+	// ---- 校验 ----
+	seen := make(map[int]bool, len(items))
+	for i := range items {
+		it := &items[i]
+		if it.MinQty < 2 {
+			return fmt.Errorf("第 %d 档：满几件起至少填 2（1 件就是原价，不需要配档位）", i+1)
+		}
+		if it.Discount < 1 || it.Discount > 99 {
+			return fmt.Errorf("第 %d 档：折扣需在 1~99 之间（80 表示 8 折）", i+1)
+		}
+		if seen[it.MinQty] {
+			return fmt.Errorf("满件数 %d 重复配置了两次", it.MinQty)
+		}
+		seen[it.MinQty] = true
+	}
+
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// 确认商品存在，避免给不存在的 listing 挂档位
+		var cnt int64
+		if err := tx.Model(&models.Listing{}).Where("id = ?", listingID).Count(&cnt).Error; err != nil {
+			return err
+		}
+		if cnt == 0 {
+			return ErrListingNotFound
+		}
+
+		if err := tx.Where("listing_id = ?", listingID).
+			Delete(&models.ListingTier{}).Error; err != nil {
+			return err
+		}
+		if len(items) == 0 {
+			return nil
+		}
+
+		rows := make([]models.ListingTier, 0, len(items))
+		for _, it := range items {
+			enabled := true
+			if it.Enabled != nil {
+				enabled = *it.Enabled
+			}
+			rows = append(rows, models.ListingTier{
+				ListingID: listingID,
+				MinQty:    it.MinQty,
+				Discount:  it.Discount,
+				Label:     strings.TrimSpace(it.Label),
+				Enabled:   enabled,
+			})
+		}
+		return tx.Create(&rows).Error
+	})
 }
 
 // IncrSold 累加已售数量（下单成功后调用，失败不影响主流程）。

@@ -120,6 +120,17 @@ export default function ShopRechargeModal({ open, onClose, onPaid, info }: Props
   /** 发起支付 */
   const onFinish = async (values: { amount: number; pay_type: string }) => {
     setCreating(true);
+
+    // ---- 关键：在 await 之前先把窗口占住 ----
+    //
+    // 浏览器只允许在「用户手势的同步调用栈内」开新窗口。等接口返回后再调
+    // window.open 已经脱离了手势，会被当成广告弹窗直接拦掉 —— 这就是
+    // 「点了充值却没有打开支付页」的真正原因，与浏览器设置无关。
+    //
+    // 所以这里先开一个空白窗（此刻还在点击的同步栈里，不会被拦），
+    // 拿到 pay_url 之后再把这个窗口导航过去。
+    const pendingWindow = window.open('about:blank', '_blank');
+
     try {
       const res = await shopApi.createPayment({
         amount: values.amount,
@@ -128,18 +139,34 @@ export default function ShopRechargeModal({ open, onClose, onPaid, info }: Props
       });
       setPaying(res);
 
-      // 页面跳转模式：把上游返回的表单写进新窗口，浏览器会自动提交
+      // 上游返回的两种形态都要能跳转：
+      //   1) form_html —— 标准易支付：一段自动提交的表单，写进新窗口即可
+      //   2) pay_url   —— 302 跳转式网关：收银台地址，直接导航过去
       if (res.form_html) {
-        const w = window.open('', '_blank');
-        if (w) {
-          w.document.write(res.form_html);
-          w.document.close();
+        if (pendingWindow) {
+          pendingWindow.document.write(res.form_html);
+          pendingWindow.document.close();
         } else {
-          message.warning('浏览器拦截了新窗口，请允许弹窗后重试，或改用二维码支付');
+          message.warning('浏览器拦截了新窗口，请点下方按钮前往支付');
         }
+      } else if (res.pay_url) {
+        if (pendingWindow) {
+          pendingWindow.location.href = res.pay_url;
+        } else {
+          // 开窗被拦时不阻断流程：弹窗里始终有「前往支付页面」按钮兜底
+          message.warning('浏览器拦截了新窗口，请点下方「前往支付页面」完成付款');
+        }
+      } else if (pendingWindow) {
+        // 上游没给地址，把占位的空白窗关掉，别留一个白页给用户
+        pendingWindow.close();
+        message.warning('暂时无法获取支付链接，请稍后重试或联系客服');
       }
-      message.info('请在新打开的页面完成支付');
+      if (res.form_html || res.pay_url) {
+        message.info('请在新打开的页面完成支付');
+      }
     } catch (e) {
+      // 失败时同样要收掉占位空窗，否则用户会看到一个永远空白的标签页
+      pendingWindow?.close();
       message.error(e instanceof Error ? e.message : '发起支付失败');
     } finally {
       setCreating(false);
@@ -171,8 +198,26 @@ export default function ShopRechargeModal({ open, onClose, onPaid, info }: Props
             type="info"
             showIcon
             message={`应付金额 ¥${formatMoney(paying.amount)}`}
-            description="请在新打开的支付页面完成付款。若未自动打开，请检查浏览器是否拦截了弹窗。"
+            description={
+              paying.pay_url
+                ? '若支付页面没有自动打开，请点下方按钮前往。'
+                : '请在新打开的支付页面完成付款。若未自动打开，请检查浏览器是否拦截了弹窗。'
+            }
           />
+
+          {/* 兜底入口：用户点击属于真实手势，永远不会被弹窗拦截策略挡住。
+              自动开窗可能因为浏览器策略失败，这个按钮必须始终在。 */}
+          {paying.pay_url && (
+            <Button
+              type="primary"
+              size="large"
+              href={paying.pay_url}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              前往支付页面
+            </Button>
+          )}
 
           {paying.qrcode && (
             <div>

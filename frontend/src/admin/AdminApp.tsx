@@ -17,6 +17,7 @@ import Users from '@/pages/Users';
 import Settings from '@/pages/Settings';
 import Tokens from '@/pages/Tokens';
 import Logs from '@/pages/Logs';
+import Tickets from '@/pages/Tickets';
 import ShopAdmin from '@/pages/ShopAdmin';
 import PaymentAdmin from '@/pages/PaymentAdmin';
 import Security from '@/pages/Security';
@@ -69,6 +70,8 @@ export default function AdminApp() {
           <Route path="/admin/goods" element={<Goods />} />
           <Route path="/admin/platforms" element={<Platforms />} />
           <Route path="/admin/logs" element={<Logs />} />
+          {/* 工单：所有登录的员工都能处理售后，不额外限制管理员 */}
+          <Route path="/admin/tickets" element={<Tickets />} />
           {/* 账号安全对所有员工开放：operator 也应该能给自己绑 2FA */}
           <Route path="/admin/security" element={<Security />} />
           {/* 以下仅管理员可见，非管理员访问会被兜底路由弹回概览 */}

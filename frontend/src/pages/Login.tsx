@@ -9,6 +9,16 @@ const { Text } = Typography;
 /** 两步验证临时票据的有效期（与后端一致，用于倒计时） */
 const TICKET_TTL_SECONDS = 300;
 
+/**
+ * 后台登录页（设计系统 §5 P0-5）。
+ *
+ * 版式：左侧深墨品牌区（和后台侧栏同色系，登录后无缝过渡）+
+ *       右侧纯表单。窄屏（<900px）自动隐藏左侧，只留表单 + 小 logo。
+ *
+ * 流程：账号密码 →（若该账号开了两步验证）动态码 / 恢复码。
+ * 两步验证是分支合并后新增的能力，因此右侧卡片里有「第一步 / 第二步」两态，
+ * 两态共用同一张卡，避免跳页造成票据丢失。
+ */
 export default function Login() {
   const { login, loginTOTP } = useAuth();
   const navigate = useNavigate();
@@ -83,113 +93,162 @@ export default function Login() {
 
   return (
     <div className="login-wrap">
-      <div className="login-card">
-        <div className="login-brand">
-          <span className="login-logo">K</span>
-          <span className="login-title">kamihub</span>
+      {/* ── 左侧品牌区 ── */}
+      <aside className="login-aside">
+        <div className="login-aside-brand">
+          <span className="login-aside-logo">K</span>
+          <div>
+            <div className="login-aside-title">kamihub</div>
+            <div className="login-aside-sub">多平台卡密采购与统一发货</div>
+          </div>
         </div>
-        <p className="login-sub">多平台卡密采购与统一发货 · 管理后台</p>
 
-        {error && (
-          <Alert
-            type="error"
-            message={error}
-            showIcon
-            style={{ marginBottom: 16 }}
-            closable
-            onClose={() => setError('')}
-          />
-        )}
+        <div className="login-aside-body">
+          <h1 className="login-aside-h1">
+            一个后台，管住
+            <br />
+            <em>采购 · 发货 · 售后</em>
+            全流程
+          </h1>
+          <p className="login-aside-desc">
+            多平台货源自动择优、失败自动切换、提货链接一键交付，买家侧与员工侧数据实时同步。
+          </p>
 
-        {ticket ? (
-          /* ---------------- 第二步：动态验证码 ---------------- */
-          <>
+          <div className="login-aside-points">
+            <div className="login-aside-point">
+              <i />
+              订单、提货链接、卡密状态一屏可查
+            </div>
+            <div className="login-aside-point">
+              <i />
+              库存与发货异常主动提醒，不用等买家反馈
+            </div>
+            <div className="login-aside-point">
+              <i />
+              余额、充值码、在线支付统一对账
+            </div>
+          </div>
+        </div>
+
+        <div className="login-aside-foot">© {new Date().getFullYear()} kamihub · 内部员工系统</div>
+      </aside>
+
+      {/* ── 右侧表单区 ── */}
+      <div className="login-main">
+        <div className="login-card">
+          <div className="login-mobile-brand">
+            <span className="login-aside-logo">K</span>
+            <span className="login-aside-title">kamihub</span>
+          </div>
+
+          <h2 className="login-card-title">登录员工后台</h2>
+          <p className="login-card-sub">使用你的后台账号登录</p>
+
+          {error && (
             <Alert
-              type="info"
+              type="error"
+              message={error}
               showIcon
-              style={{ marginBottom: 16, fontSize: 13 }}
-              message="该账号已开启两步验证"
-              description={`请输入验证器 App 上的 6 位动态码；也可使用一个恢复码（用过即作废）。剩余 ${Math.floor(
-                left / 60,
-              )}:${String(left % 60).padStart(2, '0')}`}
+              style={{ marginBottom: 16 }}
+              closable
+              onClose={() => setError('')}
             />
-            <Form layout="vertical" onFinish={onVerifyTOTP} requiredMark={false} size="large">
-              <Form.Item
-                name="code"
-                rules={[{ required: true, message: '请输入动态码或恢复码' }]}
-                extra={<Text type="secondary" style={{ fontSize: 12 }}>动态码 6 位数字；恢复码形如 ABCD-EFGH-IJKL</Text>}
-              >
-                <Input prefix={<KeyOutlined />} placeholder="动态码 / 恢复码" autoFocus autoComplete="one-time-code" />
-              </Form.Item>
-              <Form.Item style={{ marginBottom: 0, marginTop: 4 }}>
-                <Button type="primary" htmlType="submit" loading={loading} block>
-                  验证并登录
-                </Button>
-              </Form.Item>
-              <div style={{ marginTop: 10, textAlign: 'center' }}>
-                <Button
-                  type="link"
-                  size="small"
-                  onClick={() => {
-                    setTicket('');
-                    setError('');
-                  }}
-                >
-                  返回重新输入密码
-                </Button>
-              </div>
-            </Form>
-          </>
-        ) : (
-          /* ---------------- 第一步：账号密码 ---------------- */
-          <>
-            <Alert
-              type="info"
-              showIcon
-              style={{ marginBottom: 16, fontSize: 13 }}
-              message="这里是员工后台"
-              description={
-                <>
-                  买家请前往 <a href="/">商城首页</a>
-                </>
-              }
-            />
+          )}
 
-            <Form layout="vertical" onFinish={onLogin} requiredMark={false} size="large">
-              <Form.Item name="username" rules={[{ required: true, message: '请输入用户名' }]}>
-                <Input prefix={<UserOutlined />} placeholder="用户名" autoComplete="username" autoFocus />
-              </Form.Item>
-              <Form.Item name="password" rules={[{ required: true, message: '请输入密码' }]}>
-                <Input.Password prefix={<LockOutlined />} placeholder="密码" autoComplete="current-password" />
-              </Form.Item>
-              <Form.Item style={{ marginBottom: 0, marginTop: 4 }}>
-                <Button type="primary" htmlType="submit" loading={loading} block>
-                  登录
-                </Button>
-              </Form.Item>
-            </Form>
-
-            {setupRequired && (
+          {ticket ? (
+            /* ---------------- 第二步：动态验证码 ---------------- */
+            <>
               <Alert
-                type="warning"
+                type="info"
                 showIcon
-                style={{ marginTop: 14, fontSize: 13 }}
-                message="管理员账号尚未绑定两步验证"
-                description="请登录后在「账号安全」里绑定。绑定后即使密码泄露，攻击者也进不了后台。"
+                style={{ marginBottom: 16, fontSize: 13 }}
+                message="该账号已开启两步验证"
+                description={`请输入验证器 App 上的 6 位动态码；也可使用一个恢复码（用过即作废）。剩余 ${Math.floor(
+                  left / 60,
+                )}:${String(left % 60).padStart(2, '0')}`}
               />
-            )}
+              <Form layout="vertical" onFinish={onVerifyTOTP} requiredMark={false} size="large">
+                <Form.Item
+                  name="code"
+                  rules={[{ required: true, message: '请输入动态码或恢复码' }]}
+                  extra={
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      动态码 6 位数字；恢复码形如 ABCD-EFGH-IJKL
+                    </Text>
+                  }
+                >
+                  <Input prefix={<KeyOutlined />} placeholder="动态码 / 恢复码" autoFocus autoComplete="one-time-code" />
+                </Form.Item>
+                <Form.Item style={{ marginBottom: 0 }}>
+                  <Button type="primary" htmlType="submit" loading={loading} block size="large">
+                    验证并登录
+                  </Button>
+                </Form.Item>
+                <div style={{ marginTop: 10, textAlign: 'center' }}>
+                  <Button
+                    type="link"
+                    size="small"
+                    onClick={() => {
+                      setTicket('');
+                      setError('');
+                    }}
+                  >
+                    返回重新输入密码
+                  </Button>
+                </div>
+              </Form>
+            </>
+          ) : (
+            /* ---------------- 第一步：账号密码 ---------------- */
+            <>
+              <Form layout="vertical" onFinish={onLogin} requiredMark={false} size="large">
+                <Form.Item
+                  name="username"
+                  label="用户名"
+                  rules={[{ required: true, message: '请输入用户名' }]}
+                >
+                  <Input prefix={<UserOutlined />} placeholder="用户名" autoComplete="username" autoFocus />
+                </Form.Item>
+                <Form.Item
+                  name="password"
+                  label="密码"
+                  style={{ marginBottom: 20 }}
+                  rules={[{ required: true, message: '请输入密码' }]}
+                >
+                  <Input.Password prefix={<LockOutlined />} placeholder="密码" autoComplete="current-password" />
+                </Form.Item>
+                <Form.Item style={{ marginBottom: 0 }}>
+                  <Button type="primary" htmlType="submit" loading={loading} block size="large">
+                    登录
+                  </Button>
+                </Form.Item>
+              </Form>
 
-            {/* 对接方通常没有后台账号，在登录页给出文档入口，
-                让他们不必先找我们要一个账号才能看到接口说明。 */}
-            <div style={{ marginTop: 18, textAlign: 'center', fontSize: 13 }}>
+              {setupRequired && (
+                <Alert
+                  type="warning"
+                  showIcon
+                  style={{ marginTop: 14, fontSize: 13 }}
+                  message="管理员账号尚未绑定两步验证"
+                  description="请登录后在「账号安全」里绑定。绑定后即使密码泄露，攻击者也进不了后台。"
+                />
+              )}
+            </>
+          )}
+
+          {/* 对接方通常没有后台账号，在登录页给出文档入口，
+              让他们不必先找我们要一个账号才能看到接口说明。 */}
+          <div className="login-switch-buyer">
+            <span>不是员工？</span>
+            <span>
+              <a href="/">买家商城</a>
+              <span style={{ color: '#d5dae4', margin: '0 7px' }}>·</span>
               <a href="/docs" target="_blank" rel="noreferrer">
                 开放接口文档
               </a>
-              <span style={{ color: '#c3c9d4', margin: '0 8px' }}>·</span>
-              <a href="/">买家商城</a>
-            </div>
-          </>
-        )}
+            </span>
+          </div>
+        </div>
       </div>
     </div>
   );

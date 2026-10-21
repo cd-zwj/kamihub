@@ -3,10 +3,11 @@ import type { InternalAxiosRequestConfig } from 'axios';
 import { message } from 'antd';
 import type {
   AdapterMeta, AdminAgentRow, AdminPriceTier, AdminTierPrice, AllSettings, AuditLog, BlacklistEntry,
-  CallLog, CaptchaChallenge, CardListResult, CardStats, DashboardCharts, DashboardStats, Delivery, DeliveryView, Envelope,
-  Goods, LoginResult, Notification, NotifyStatus, Order, OrderAttempt, PageResult, Platform, ReconcileDiff,
-  RiskHit, RiskRule, StrategyMeta, Supply, TOTPSetupResult, TOTPStatus, TrustedDevice, LoginIPRecord,
-  User, WorkerTask, WorkerTaskRun,
+  CallLog, CaptchaChallenge, CardListResult, CardStats, DashboardCharts, DashboardStats, Delivery,
+  DeliveryView, Envelope, Goods, LoginIPRecord, LoginResult, Notification, NotifyStatus, Order,
+  OrderAttempt, PageResult, Platform, ReconcileDiff, RiskHit, RiskRule, StrategyMeta, Supply,
+  TOTPSetupResult, TOTPStatus, TicketAdmin, TicketAdminDetail, TrustedDevice, User, WorkerTask,
+  WorkerTaskRun,
 } from './types';
 
 const TOKEN_KEY = 'kamihub_token';
@@ -426,6 +427,16 @@ export const api = {
   // ---------- 日志 ----------
   callLogs: (q: ListQuery = {}) => unwrap<PageResult<CallLog>>(http.get('/call-logs', { params: q })),
   auditLogs: (q: ListQuery = {}) => unwrap<PageResult<AuditLog>>(http.get('/audit-logs', { params: q })),
+
+  // ---------- 工单（售后）----------
+  tickets: (q: ListQuery & { status?: string; category?: string } = {}) =>
+    unwrap<PageResult<TicketAdmin>>(http.get('/tickets', { params: q })),
+  ticket: (id: number) => unwrap<TicketAdminDetail>(http.get(`/tickets/${id}`)),
+  replyTicket: (id: number, body: { content: string; images?: string[] }) =>
+    unwrap<{ ok: boolean }>(http.post(`/tickets/${id}/reply`, body)),
+  setTicketStatus: (id: number, status: string) =>
+    unwrap<{ ok: boolean }>(http.post(`/tickets/${id}/status`, { status })),
+  ticketUnread: () => unwrap<{ unread: number }>(http.get('/tickets/unread')),
 
   // ---------- 用户 ----------
   users: (q: ListQuery = {}) => unwrap<PageResult<User>>(http.get('/users', { params: q })),

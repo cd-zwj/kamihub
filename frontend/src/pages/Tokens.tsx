@@ -6,6 +6,7 @@ import { CopyOutlined, ExportOutlined, KeyOutlined, ThunderboltOutlined } from '
 import { api, toastError } from '@/api/client';
 import type { User } from '@/api/types';
 import { fmtTime } from '@/utils/format';
+import { PageHeader } from '@/admin/ui';
 
 /** 开放接口文档地址：用当前域名拼，避免写死环境 */
 const DOCS_URL = `${window.location.origin}/docs`;
@@ -92,14 +93,10 @@ export default function Tokens() {
 
   return (
     <>
-      <div className="page-head">
-        <div>
-          <h2 className="page-title">访问令牌</h2>
-          <p className="page-desc">
-            为服务端对接签发长期 JWT。对接方把令牌放在 <code>Authorization: Bearer &lt;令牌&gt;</code> 请求头里即可调用接口。
-          </p>
-        </div>
-      </div>
+      <PageHeader
+        title="访问令牌"
+        desc="为服务端对接签发长期 JWT，对接方放到 Authorization: Bearer <令牌> 请求头即可调用"
+      />
 
       <Alert
         type="warning"
@@ -184,7 +181,7 @@ export default function Tokens() {
           >
             复制
           </Button>
-          <Button type="primary" icon={<ExportOutlined />} onClick={() => window.open(DOCS_URL, '_blank')}>
+          <Button icon={<ExportOutlined />} onClick={() => window.open(DOCS_URL, '_blank')}>
             打开文档
           </Button>
         </Space.Compact>

@@ -1,4 +1,4 @@
-﻿import { useState } from 'react';
+import { useState } from 'react';
 import {
   Alert,
   Button,
@@ -243,8 +243,13 @@ export default function GoodsWizard({ open, strategies, onClose, onCreated }: Pr
         >
           <InputNumber min={0} step={0.01} style={{ width: '100%' }} />
         </Form.Item>
-        <Form.Item name="max_quantity" label="单次数量上限" style={{ width: 150 }}>
-          <InputNumber min={1} max={10000} style={{ width: '100%' }} />
+        <Form.Item
+          name="max_quantity"
+          label="单次数量上限"
+          tooltip="0 表示不限购。填大于 0 的数字会限制买家一单最多买几件"
+          style={{ width: 150 }}
+        >
+          <InputNumber min={0} max={10000} style={{ width: '100%' }} />
         </Form.Item>
         {usesCardPool && (
           <Form.Item
@@ -431,7 +436,9 @@ export default function GoodsWizard({ open, strategies, onClose, onCreated }: Pr
               routing_strategy: 'priority',
               failover_enabled: true,
               max_attempts: 3,
-              max_quantity: 1,
+              // 0 = 不限购。默认必须是 0：以前默认 1，新建商品会静默变成
+              // 「限购 1 件」，买家买 2 件就会被拦下（表现为发货失败、钱退回余额）。
+              max_quantity: 0,
               price: 0,
               max_supply_price: 0,
               cost_price: 0,

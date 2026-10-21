@@ -202,9 +202,12 @@ func (s *GoodsService) Create(ctx context.Context, in GoodsInput) (*models.Goods
 		RoutingStrategy: models.StrategyPriority,
 		FailoverEnabled: true,
 		MaxAttempts:     3,
-		MaxQuantity:     1,
-		ExtraTemplate:   in.ExtraTemplate,
-		StockMode:       models.StockModeUpstream,
+		// 限购默认 0（不限）。以前默认 1，新建商品就会静默变成
+		// 「限购 1 件」，买家买 2 件被本地校验拦下，而商城前端只按
+		// listing.max_qty 展示、看不出限制，最终表现为「发货失败、钱退回余额」。
+		MaxQuantity:   0,
+		ExtraTemplate: in.ExtraTemplate,
+		StockMode:     models.StockModeUpstream,
 		// 混合模式下默认池子优先：池子里是已经付过钱的沉没成本，
 		// 而且是退货/自采进来的，不清掉就一直占着资金。
 		LocalStockFirst: true,
@@ -224,7 +227,13 @@ func (s *GoodsService) Create(ctx context.Context, in GoodsInput) (*models.Goods
 	if in.MaxAttempts != nil && *in.MaxAttempts > 0 {
 		g.MaxAttempts = *in.MaxAttempts
 	}
-	if in.MaxQuantity != nil && *in.MaxQuantity > 0 {
+	// 限购：显式传 0 表示「不限购」，必须能写进去。
+	// 之前这里只接受 >0，导致运营把「单次数量上限」改成 0 时不生效，
+	// 商品实际仍是限购 1 件 —— 这正是「配置项形同虚设」的根因。
+	if in.MaxQuantity != nil {
+		if *in.MaxQuantity < 0 {
+			return nil, errors.New("单次数量上限不能为负数（0 表示不限购）")
+		}
 		g.MaxQuantity = *in.MaxQuantity
 	}
 	if in.MaxSupplyPrice != nil && in.MaxSupplyPrice.IsPositive() {
@@ -341,7 +350,12 @@ func (s *GoodsService) Update(ctx context.Context, id uint, in GoodsInput) (*mod
 	if in.MaxAttempts != nil && *in.MaxAttempts > 0 {
 		updates["max_attempts"] = *in.MaxAttempts
 	}
-	if in.MaxQuantity != nil && *in.MaxQuantity > 0 {
+	// 限购同样允许被清空（设为 0 即「不限购」），所以用「非 nil 就写」。
+	// 和 max_supply_price 是同一个道理：用 >0 判断会让 0 永远写不进去。
+	if in.MaxQuantity != nil {
+		if *in.MaxQuantity < 0 {
+			return nil, errors.New("单次数量上限不能为负数（0 表示不限购）")
+		}
 		updates["max_quantity"] = *in.MaxQuantity
 	}
 	// 最高供应价允许被清空（设为 0 即取消限制），所以这里用「非 nil 就写」，

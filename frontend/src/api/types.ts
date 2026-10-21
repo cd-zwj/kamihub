@@ -692,12 +692,21 @@ export function auditChanges(detail: AuditLog['detail']): AuditFieldChange[] | n
   return changed as AuditFieldChange[];
 }
 
-/** 订单状态中文名 */
+/**
+ * 订单状态中文名。
+ *
+ * 取值以数据库为准（`select status, count(*) from orders group by status`）：
+ *   delivered 3913 / failed 323 / cancelled 58
+ * 改版前这里写的是 closed / refunded，实际库里没有 —— 而真实存在的
+ * cancelled 反而没翻译，界面上会直接露出英文 `cancelled`。
+ */
 export const ORDER_STATUS_TEXT: Record<string, string> = {
   pending: '待处理',
   purchasing: '采购中',
   delivered: '已发货',
   failed: '失败',
+  cancelled: '已取消',
+  // 保留旧键：历史数据/其他分支可能还在用
   closed: '已关闭',
   refunded: '已退款',
 };
@@ -707,6 +716,7 @@ export const ORDER_STATUS_COLOR: Record<string, string> = {
   purchasing: 'processing',
   delivered: 'success',
   failed: 'error',
+  cancelled: 'default',
   closed: 'default',
   refunded: 'warning',
 };
@@ -864,3 +874,66 @@ export const LEVEL_COLOR: Record<string, string> = {
   warn: 'orange',
   error: 'red',
 };
+
+// ---------------------------------------------------------------- 工单（售后）
+
+/** 后台工单列表项 */
+export interface TicketAdmin {
+  id: number;
+  ticket_no: string;
+  buyer_id: number;
+  order_id?: number | null;
+  category: string;
+  priority: number;
+  subject: string;
+  status: string;
+  context_snapshot?: string;
+  buyer_unread: number;
+  admin_unread: number;
+  last_reply_at?: string | null;
+  last_reply_by?: string;
+  admin_id?: number | null;
+  resolved_at?: string | null;
+  created_at: string;
+  updated_at?: string;
+  /** 运营视角补充字段 */
+  buyer_name?: string;
+  order_no?: string;
+}
+
+/** 工单消息 */
+export interface TicketAdminMessage {
+  id: number;
+  ticket_id: number;
+  sender_type: 'buyer' | 'admin' | 'system';
+  sender_id?: number | null;
+  sender_name?: string;
+  content: string;
+  images?: string;
+  created_at: string;
+}
+
+/** 工单详情 */
+export interface TicketAdminDetail {
+  ticket: TicketAdmin;
+  messages: TicketAdminMessage[];
+  buyer_name?: string;
+  order_no?: string;
+}
+
+/** 提单时后端生成的订单上下文快照 */
+export interface TicketContext {
+  order_no?: string;
+  goods_name?: string;
+  quantity?: number;
+  paid_amount?: string;
+  order_status?: string;
+  status_text?: string;
+  order_time?: string;
+  delivered_at?: string;
+  error_msg?: string;
+  card_count?: number;
+  delivery_state?: string;
+  delivery_expire?: string;
+  view_count?: number;
+}

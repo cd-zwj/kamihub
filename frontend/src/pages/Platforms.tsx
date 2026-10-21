@@ -8,6 +8,7 @@ import { api, toastError } from '@/api/client';
 import type { AdapterMeta, Platform } from '@/api/types';
 import { fmtTime, money } from '@/utils/format';
 import { useAuth } from '@/auth/AuthContext';
+import { PageHeader, StatusTag } from '@/admin/ui';
 
 const EXTRA_PLACEHOLDER = `{
   "stock": 100,
@@ -186,19 +187,17 @@ export default function Platforms() {
 
   return (
     <>
-      <div className="page-head">
-        <div>
-          <h2 className="page-title">平台管理</h2>
-          <p className="page-desc">
-            每个平台使用对应的适配器处理签名与报文差异。同一个适配器可以配置多个实例（多账号）。
-          </p>
-        </div>
-        {isAdmin && (
-          <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
-            新增平台
-          </Button>
-        )}
-      </div>
+      <PageHeader
+        title="平台管理"
+        desc="每个平台使用对应的适配器处理签名与报文差异，同一个适配器可以配置多个实例（多账号）"
+        extra={
+          isAdmin && (
+            <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
+              新增平台
+            </Button>
+          )
+        }
+      />
 
       <Card size="small">
         <div className="table-toolbar">
@@ -275,17 +274,20 @@ export default function Platforms() {
             {
               title: '凭证',
               width: 130,
+              // 改版前每个凭证一个 Tag 且 wrap，两个凭证就竖着排成两行、
+              // 行高被撑到 71px。凭证名是技术串，统一放 Tooltip 里看全，
+              // 单元格只显示「N 项」。
               render: (_, r) =>
                 r.credential_keys?.length ? (
-                  <Space size={4} wrap>
-                    {r.credential_keys.map((k) => (
-                      <Tag key={k} color="blue">
-                        {k}
-                      </Tag>
-                    ))}
-                  </Space>
+                  <Tooltip title={`已配置：${r.credential_keys.join(' / ')}`}>
+                    <StatusTag tone="info">{r.credential_keys.length} 项</StatusTag>
+                  </Tooltip>
                 ) : (
-                  <Tag color="warning">未配置</Tag>
+                  <Tooltip title="缺少接口凭证，下单会失败">
+                    <StatusTag tone="warning" dot>
+                      未配置
+                    </StatusTag>
+                  </Tooltip>
                 ),
             },
             {

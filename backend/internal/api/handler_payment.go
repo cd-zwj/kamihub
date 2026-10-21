@@ -35,9 +35,21 @@ type shopCreatePaymentReq struct {
 	PayType string  `json:"pay_type"`
 	// UseAPI true 走 mapi.php 拿二维码；false 走 submit.php 页面跳转
 	UseAPI bool `json:"use_api"`
+
+	// ---- 直付购卡（一次性下单支付，不必先充值）----
+	//
+	// Purpose 传 "order" 表示这笔不是充值，而是直接买某个商品：
+	//   - 金额由服务端按商品售价重新计算（Amount 会被覆盖，改前端没用）
+	//   - 付款成功后自动下单发货；万一发货失败，钱留在余额里
+	// 不传或传 "recharge" 时，行为与历史完全一致（纯充值）。
+	Purpose   string `json:"purpose"`
+	ListingID uint   `json:"listing_id"`
+	Quantity  int    `json:"quantity"`
+	// RequestID 直付购卡的幂等键，前端生成；重复请求不会重复下单
+	RequestID string `json:"request_id"`
 }
 
-// shopCreatePayment 发起一笔在线充值
+// shopCreatePayment 发起一笔在线支付（充值 或 直付购卡）
 func (h *Handlers) shopCreatePayment(c *gin.Context) {
 	buyer := CurrentBuyer(c)
 	if buyer == nil {
@@ -61,6 +73,30 @@ func (h *Handlers) shopCreatePayment(c *gin.Context) {
 		return
 	}
 
+	// 直付购卡：组装购买意图。这里只做参数形状校验，
+	// 真正的价格与库存由服务层按 C 端售价权威计算。
+	var intent *service.CreatePayIntent
+	if strings.EqualFold(strings.TrimSpace(req.Purpose), "order") {
+		if req.ListingID == 0 {
+			BadRequest(c, "缺少商品信息")
+			return
+		}
+		qty := req.Quantity
+		if qty <= 0 {
+			qty = 1
+		}
+		// 与余额下单保持同一个上限，避免绕过 shopPurchase 的限购
+		if qty > 1000 {
+			BadRequest(c, "单次购买数量不能超过 1000")
+			return
+		}
+		intent = &service.CreatePayIntent{
+			ListingID: req.ListingID,
+			Quantity:  qty,
+			RequestID: strings.TrimSpace(req.RequestID),
+		}
+	}
+
 	amount := decimal.NewFromFloat(req.Amount).Round(2)
 
 	res, err := h.payment.CreatePay(c.Request.Context(), service.CreatePayInput{
@@ -69,6 +105,7 @@ func (h *Handlers) shopCreatePayment(c *gin.Context) {
 		PayType:  strings.TrimSpace(req.PayType),
 		ClientIP: c.ClientIP(),
 		UseAPI:   req.UseAPI,
+		Intent:   intent,
 	})
 	if err != nil {
 		h.abortPayment(c, err)
@@ -109,13 +146,24 @@ func (h *Handlers) shopPaymentStatus(c *gin.Context) {
 		// 上游暂时查不到时不算致命错误：把本地状态返回给前端，
 		// 让买家看到「处理中」，稍后再试
 		if p, e2 := h.payment.GetBuyerPayment(c.Request.Context(), buyer.ID, tradeNo); e2 == nil {
-			OK(c, gin.H{"payment": p, "warning": err.Error()})
+			// 查单报错也要把自动发货结果带上：钱可能已经到账并发货了，
+			// 不能因为上游一次抖动就让买家看不到自己的卡密。
+			OK(c, gin.H{
+				"payment":  p,
+				"warning":  err.Error(),
+				"purchase": h.payment.DispatchResult(c.Request.Context(), p),
+			})
 			return
 		}
 		BadRequest(c, err.Error())
 		return
 	}
-	OK(c, gin.H{"payment": po})
+	// purchase 仅在「直付购卡」时有值；纯充值返回 null，
+	// 老前端忽略该字段即可，行为与之前完全一致。
+	OK(c, gin.H{
+		"payment":  po,
+		"purchase": h.payment.DispatchResult(c.Request.Context(), po),
+	})
 }
 
 // shopListPayments 我的在线充值记录

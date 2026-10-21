@@ -1,9 +1,35 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
-import { App as AntApp, ConfigProvider } from 'antd';
+import { App as AntApp, ConfigProvider, theme as antdTheme } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
-import { darkTheme, lightTheme } from '@/theme';
+import type { ThemeConfig } from 'antd';
+import { buildAdminTheme } from '@/admin/theme';
 
 const STORAGE_KEY = 'kamihub_theme';
+
+/**
+ * 亮色 = 后台设计系统令牌（src/admin/theme.ts）。
+ *
+ * 合并说明：分支上的「迭代 4 UI 改造」原本用 src/theme.ts 里的一套独立令牌，
+ * 而生产环境同时上线的是一套完整设计系统（styles.css 的 --a-* 变量就是它）。
+ * 两者只能留一个作为唯一来源，这里是设计系统 —— 否则新页面（工单 / API 密钥 /
+ * 匿名购买）的 CSS 变量与 antd 组件会各走一套配色。
+ */
+const lightTheme: ThemeConfig = buildAdminTheme();
+
+/**
+ * 暗色 = 同一套设计系统令牌 + antd 内置 darkAlgorithm。
+ *
+ * 不手写一套暗色色板：那是「做完整设计系统」的工作量，
+ * 单店内部系统用 antd 算法最省心，且能保证暗色下对比度可用。
+ */
+const darkTheme: ThemeConfig = {
+  ...buildAdminTheme(),
+  algorithm: antdTheme.darkAlgorithm,
+  token: {
+    ...buildAdminTheme().token,
+    colorBgLayout: '#0f1115',
+  },
+};
 
 type Mode = 'light' | 'dark';
 

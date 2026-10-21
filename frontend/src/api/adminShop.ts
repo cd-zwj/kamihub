@@ -87,6 +87,26 @@ export interface AdminListingStock {
   price_zero: boolean;
 }
 
+/**
+ * 阶梯折扣档位。
+ *
+ * 语义：买满 min_qty 件，整单按 discount 结算。
+ * discount=90 表示 9 折（即打 90%），不是「减 90 元」。
+ */
+export interface AdminListingTier {
+  id?: number;
+  listing_id?: number;
+  /** 满几件起生效（含），最小 2 —— 1 件就是原价，不用配 */
+  min_qty: number;
+  /** 折扣百分比：90 = 9 折，85 = 8.5 折；范围 1~99 */
+  discount: number;
+  /** 展示文案，留空时前端自动拼「满 N 件 X 折」 */
+  label?: string;
+  enabled: boolean;
+}
+
+export type AdminListingTierInput = Omit<AdminListingTier, 'id' | 'listing_id'>;
+
 export interface AdminRechargeCode {
   id: number;
   code: string;
@@ -174,6 +194,8 @@ export interface PaymentSettings {
   submit_path: string;
   mapi_path: string;
   query_path: string;
+  /** 接入方式：epay = 标准易支付；epay_redirect = 302 跳转式（彩豆等） */
+  gateway: string;
   site_name: string;
   pay_types: string[];
   min_amount: number;
@@ -212,6 +234,11 @@ export const adminShopApi = {
   listing: (id: number) => unwrap<AdminListing>(http.get(`/listings/${id}`)),
   createListing: (body: unknown) => unwrap<AdminListing>(http.post('/listings', body)),
   updateListing: (id: number, body: unknown) => unwrap<AdminListing>(http.put(`/listings/${id}`, body)),
+  // 阶梯折扣：整体替换语义（运营在表格里编辑完一次保存）
+  listTiers: (listingId: number) =>
+    unwrap<{ tiers: AdminListingTier[] }>(http.get(`/listings/${listingId}/tiers`)),
+  saveTiers: (listingId: number, tiers: AdminListingTierInput[]) =>
+    unwrap<{ ok: boolean }>(http.put(`/listings/${listingId}/tiers`, { tiers })),
   deleteListing: (id: number) => unwrap<{ message: string }>(http.delete(`/listings/${id}`)),
 
   // 充值码

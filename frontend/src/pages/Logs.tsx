@@ -6,6 +6,7 @@ import { useDrawerWidth } from '@/hooks/useIsMobile';
 import type { AuditLog, CallLog, Notification, Platform, ReconcileDiff, WorkerTask } from '@/api/types';
 import { LEVEL_COLOR, auditChanges, reconcileKindText, taskText } from '@/api/types';
 import { fmtTime } from '@/utils/format';
+import { PageHeader } from '@/admin/ui';
 
 const ACTION_TEXT: Record<string, string> = {
   'auth.login': '登录成功',
@@ -281,14 +282,10 @@ export default function Logs() {
 
   return (
     <>
-      <div className="page-head">
-        <div>
-          <h2 className="page-title">日志与运维</h2>
-          <p className="page-desc">
-            上游调用日志已自动脱敏，卡密与密钥不会落库；定时任务、对账差异与运维告警集中在此查看。
-          </p>
-        </div>
-      </div>
+      <PageHeader
+        title="日志与运维"
+        desc="上游调用日志已自动脱敏，卡密与密钥不会落库；定时任务、对账差异与运维告警集中在此查看"
+      />
 
       <Card size="small">
         <Tabs
