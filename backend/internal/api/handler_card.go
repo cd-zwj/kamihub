@@ -42,6 +42,11 @@ func (h *Handlers) listCards(c *gin.Context) {
 	// 只有显式要求才返回明文，并把这次查看记进审计
 	reveal := c.Query("reveal") == "1"
 	if reveal {
+		// 卡密明文 = 全部库存资产，泄露可直接变现，必须二次确认。
+		// 只在 reveal 时要求：翻页看掩码列表不需要，否则没人愿意用。
+		if !h.requireConfirm(c) {
+			return
+		}
 		h.auditLog(c, "card.reveal", "goods", itoa(int64(goodsID)), gin.H{
 			"page": page, "keyword": f.Keyword,
 		})

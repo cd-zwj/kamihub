@@ -30,8 +30,8 @@ import (
 // AES-GCM 带认证标签，试错只会返回失败，不会得到一段似是而非的明文。
 const (
 	keyTagPrefix = "k"
-	keyTagLen    = 8  // hex 字符数，即 32 bit
-	keyTagSep    = ":" 
+	keyTagLen    = 8 // hex 字符数，即 32 bit
+	keyTagSep    = ":"
 )
 
 // ErrKeyMismatch 表示密文无法用 keyring 中任何一把密钥解开。

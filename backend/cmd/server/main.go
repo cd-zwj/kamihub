@@ -90,6 +90,10 @@ type deps struct {
 	pricing *service.PricingService
 	agent   *service.AgentService
 
+	// ---------- 迭代 5：S2 / S3 ----------
+	confirm    *service.ConfirmService
+	loginWatch *service.LoginWatchService
+
 	// workerRunner 定时任务调度器。为 nil 表示当前模式不跑任务。
 	workerRunner *worker.Runner
 }
@@ -322,6 +326,18 @@ func bootstrap(cfg *config.Config) (*deps, error) {
 	slog.Info("阶梯专价已装配", "fee_rate", cfg.Pricing.FeeRate,
 		"enabled", agentSvc.Enabled(context.Background()))
 
+	// ---------- 迭代 5：S2 敏感操作确认 / S3 新 IP 登录提醒 ----------
+	// 两个开关都取自后台安全设置，改完立刻生效，不用重启。
+	confirmSvc := service.NewConfirmService(db, c).
+		WithSwitch(func(ctx context.Context) bool {
+			return settings.Security(ctx).ConfirmOn()
+		})
+	loginWatchSvc := service.NewLoginWatchService(db).
+		WithNotifier(notifier).
+		WithSwitch(func(ctx context.Context) bool {
+			return settings.Security(ctx).LoginAlertOn()
+		})
+
 	// ---------- 提货页渲染（仅 api 需要）----------
 	var renderer *render.Renderer
 	if cfg.RunsAPI() {
@@ -373,6 +389,8 @@ func bootstrap(cfg *config.Config) (*deps, error) {
 		risk:         riskSvc,
 		pricing:      pricingSvc,
 		agent:        agentSvc,
+		confirm:      confirmSvc,
+		loginWatch:   loginWatchSvc,
 		renderer:     renderer,
 		routes:       routes,
 		workerRunner: workerRunner,
@@ -448,6 +466,9 @@ func startHTTP(d *deps) (*http.Server, error) {
 
 		Pricing: d.pricing,
 		Agent:   d.agent,
+
+		Confirm:    d.confirm,
+		LoginWatch: d.loginWatch,
 	})
 
 	engine := gin.New()

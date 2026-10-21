@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
-import { api, setUnauthorizedHandler, tokenStore } from '@/api/client';
+import { api, clearConfirmTicket, setUnauthorizedHandler, tokenStore } from '@/api/client';
 import type { User } from '@/api/types';
 
 interface AuthState {
@@ -76,6 +76,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       /* 后端不可达也要允许本地登出 */
     }
     tokenStore.clear();
+    // 二次确认票据也一并作废：换人登录后不该继承上一个人的确认状态
+    clearConfirmTicket();
     setUser(null);
   }, []);
 

@@ -1,4 +1,5 @@
-﻿import axios, { AxiosError } from 'axios';
+import axios, { AxiosError } from 'axios';
+import type { InternalAxiosRequestConfig } from 'axios';
 import { message } from 'antd';
 import type {
   AdapterMeta, AdminAgentRow, AdminPriceTier, AdminTierPrice, AllSettings, AuditLog, BlacklistEntry,
@@ -21,32 +22,120 @@ export function setUnauthorizedHandler(fn: () => void) {
   onUnauthorized = fn;
 }
 
+/**
+ * 敏感操作二次确认（后端 `04` 文档 S2）。
+ *
+ * 后端对「改上游凭证 / 人工调账 / 查看卡密明文」这类不可逆操作会返回
+ * 428 CONFIRM_REQUIRED。这里统一拦截：弹一次密码框换票据，
+ * 然后把原请求带上 `X-Confirm-Ticket` 重发。
+ *
+ * 票据在内存里缓存到过期（后端给 10 分钟），所以连续改几处配置只问一次。
+ * 刻意不存 localStorage：关掉标签页就该失效。
+ */
+const CONFIRM_HEADER = 'X-Confirm-Ticket';
+
+interface ConfirmTicketCache {
+  ticket: string;
+  expiresAt: number;
+}
+
+let confirmTicket: ConfirmTicketCache | null = null;
+/** 由 ConfirmPasswordDialog 注册：要求用户输入密码，返回票据 */
+let confirmPrompt: (() => Promise<string>) | null = null;
+
+export function setConfirmPrompt(fn: (() => Promise<string>) | null) {
+  confirmPrompt = fn;
+}
+
+/** 清掉缓存的票据（退出登录时调用） */
+export function clearConfirmTicket() {
+  confirmTicket = null;
+}
+
+/** 后端说不需要确认时，避免每次都白弹一次框 */
+let confirmRequired: boolean | null = null;
+export function setConfirmRequired(v: boolean | null) {
+  confirmRequired = v;
+}
+
+async function fetchConfirmTicket(password: string): Promise<string> {
+  const res = await http.post<Envelope<{ ticket: string; expires_in_seconds: number }>>(
+    '/auth/confirm',
+    { password },
+  );
+  if (res.data.code !== 1) {
+    throw new Error(res.data.msg || '确认失败');
+  }
+  const { ticket, expires_in_seconds } = res.data.data;
+  // 留 30 秒余量，避免用一张正要过期的票
+  confirmTicket = { ticket, expiresAt: Date.now() + Math.max(30, expires_in_seconds - 30) * 1000 };
+  return ticket;
+}
+
 const http = axios.create({ baseURL: '/api', timeout: 120000 });
 
 http.interceptors.request.use((config) => {
   const token = tokenStore.get();
   if (token) config.headers.Authorization = `Bearer ${token}`;
+
+  // 有未过期的票据就带上，省一次密码输入
+  if (confirmTicket && confirmTicket.expiresAt > Date.now()) {
+    config.headers[CONFIRM_HEADER] = confirmTicket.ticket;
+  }
   return config;
 });
 
 http.interceptors.response.use(
   (res) => res,
-  (error: AxiosError<Envelope<unknown>>) => {
+  async (error: AxiosError<Envelope<unknown>>) => {
     const status = error.response?.status;
     const payload = error.response?.data;
     let msg = payload?.msg || error.message || '请求失败';
 
     if (status === 401) {
       tokenStore.clear();
+      clearConfirmTicket();
       onUnauthorized?.();
       msg = payload?.msg || '登录已过期，请重新登录';
     }
     // 429 单独提示，避免用户以为是 bug
     if (status === 429) msg = payload?.msg || '请求过于频繁，请稍后再试';
 
+    /**
+     * 428 = 需要二次确认。
+     *
+     * 流程：清掉可能过期的票据 → 弹密码框 → 换新票据 → 重发原请求。
+     * 只重试一次（config._confirmRetried），否则用户取消或密码错误时会无限循环。
+     */
+    if (
+      status === 428 &&
+      payload?.error_code === 'CONFIRM_REQUIRED' &&
+      error.config &&
+      !(error.config as ConfirmableConfig)._confirmRetried &&
+      confirmPrompt &&
+      confirmRequired !== false
+    ) {
+      const config = error.config as ConfirmableConfig;
+      config._confirmRetried = true;
+      confirmTicket = null;
+      try {
+        const ticket = await confirmPrompt();
+        config.headers = config.headers ?? {};
+        config.headers[CONFIRM_HEADER] = ticket;
+        return http.request(config);
+      } catch (e) {
+        // 用户取消或密码错误：把原始错误抛出去，让页面自己提示
+        return Promise.reject(new Error(e instanceof Error ? e.message : '已取消确认'));
+      }
+    }
+
     return Promise.reject(new Error(msg));
   },
 );
+
+interface ConfirmableConfig extends InternalAxiosRequestConfig {
+  _confirmRetried?: boolean;
+}
 
 /**
  * 把分页响应里的 list 兜底成数组。
@@ -179,6 +268,16 @@ export const api = {
     unwrap<AdminTierPrice>(http.post('/agent/tier-prices', body)),
   deleteTierPrice: (id: number) =>
     unwrap<{ message: string }>(http.delete(`/agent/tier-prices/${id}`)),
+
+  // ---------- 迭代 5：敏感操作二次确认 ----------
+  /** 当前是否需要二次确认（关闭后前端不再弹框） */
+  confirmStatus: () =>
+    unwrap<{ required: boolean; ttl_seconds: number; max_fail: number }>(
+      http.get('/auth/confirm/status'),
+    ),
+  /** 用密码换一张 10 分钟有效的确认票据 */
+  confirmPassword: (password: string) =>
+    fetchConfirmTicket(password).then((ticket) => ({ ticket })),
 
   me: () => unwrap<User>(http.get('/auth/me')),
   logout: () => unwrap<{ message: string }>(http.post('/auth/logout')),

@@ -591,6 +591,12 @@ export interface SecuritySettings {
   agent_disabled: boolean;
   /** 允许买家自助申请销售资格（V1 建议 false） */
   agent_self_apply: boolean;
+
+  // ---------- 迭代 5：S2 / S3（同样是反向字段）----------
+  /** 关闭「敏感操作二次确认」（默认 false = 要求确认） */
+  confirm_disabled: boolean;
+  /** 关闭「新 IP 登录提醒」（默认 false = 提醒） */
+  login_alert_disabled: boolean;
 }
 
 export interface AllSettings {

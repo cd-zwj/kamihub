@@ -80,6 +80,11 @@ type Handlers struct {
 	// ---------- 迭代 3：销售阶梯专价 ----------
 	pricing *service.PricingService
 	agent   *service.AgentService
+
+	// ---------- 迭代 5：敏感操作二次确认 ----------
+	confirm *service.ConfirmService
+	// ---------- 迭代 5：新 IP 登录提醒 ----------
+	loginWatch *service.LoginWatchService
 }
 
 // Deps 构造依赖
@@ -118,6 +123,11 @@ type Deps struct {
 	// ---------- 迭代 3：销售阶梯专价 ----------
 	Pricing *service.PricingService
 	Agent   *service.AgentService
+
+	// ---------- 迭代 5：敏感操作二次确认 ----------
+	Confirm *service.ConfirmService
+	// ---------- 迭代 5：新 IP 登录提醒 ----------
+	LoginWatch *service.LoginWatchService
 }
 
 func NewHandlers(d Deps) *Handlers {
@@ -136,6 +146,9 @@ func NewHandlers(d Deps) *Handlers {
 		totp: d.TOTP, captcha: d.Captcha, risk: d.Risk,
 
 		pricing: d.Pricing, agent: d.Agent,
+
+		confirm: d.Confirm,
+		loginWatch: d.LoginWatch,
 	}
 }
 
@@ -248,6 +261,11 @@ func (h *Handlers) Register(r *gin.Engine) {
 		authed.POST("/auth/totp/confirm", h.totpConfirm)
 		authed.POST("/auth/totp/disable", h.totpDisable)
 		authed.POST("/auth/totp/recovery-codes", h.totpRecoveryCodes)
+
+		// ---------- 迭代 5：敏感操作二次确认 ----------
+		// 在 authed 而不是 admin：operator 也要能确认自己的操作。
+		authed.GET("/auth/confirm/status", h.confirmStatus)
+		authed.POST("/auth/confirm", h.confirmSensitive)
 
 		authed.GET("/dashboard/stats", h.dashboardStats)
 		// 迭代 4：图表看板数据（一次返回 6 组，避免首屏 6 次请求闪烁）

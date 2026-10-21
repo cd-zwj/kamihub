@@ -41,6 +41,15 @@ type Message struct {
 	Link    string         // 站内跳转链接
 	Fields  map[string]any // 结构化字段，便于渠道格式化
 	At      time.Time
+	// NoAggregate 跳过聚合窗口，每次都单独推送。
+	//
+	// 只给「每一条都是独立事实」的安全事件用。典型例子是新 IP 登录：
+	// 聚合后只剩一句「有新 IP 登录了后台」和一个次数，**到底哪个 IP 反而不知道了**，
+	// 而这是判断「是不是我」的唯一依据。
+	//
+	// 默认 false：运维告警（余额不足、平台故障）本来就该合并，
+	// 否则第一周就会把 Telegram 群刷爆。
+	NoAggregate bool
 }
 
 // Channel 一个通知渠道。
@@ -139,7 +148,7 @@ func (n *Notifier) Alert(ctx context.Context, msg Message) {
 
 	// 聚合：命中窗口就只累计，不推送
 	key := string(msg.Level) + "|" + msg.Event
-	if n.shouldSuppress(key, msg.At) {
+	if !msg.NoAggregate && n.shouldSuppress(key, msg.At) {
 		return
 	}
 
@@ -265,6 +274,12 @@ const (
 	// 「有人被标记复核」不值得打扰，但「有人被真的拦下来」必须知道 ——
 	// 那可能是黑产在试，也可能是我们自己规则配错了在拦正常客户。
 	EventRiskRejected = "risk.rejected"
+	// EventLoginNewIP 员工账号从新 IP 登录。
+	//
+	// 这是「账号被盗用」最早能被发现的信号：密码被别人拿到后，
+	// 攻击者第一次登录必然来自一个没见过的 IP。本次登录照常放行，
+	// 只提醒（新 IP 里绝大多数是本人换了网络）。
+	EventLoginNewIP = "auth.new_ip_login"
 )
 
 // 买家通知事件

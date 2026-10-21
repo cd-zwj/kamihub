@@ -128,7 +128,23 @@ func (h *Handlers) login(c *gin.Context) {
 	h.cache.Reset(ctx, keyPerUser, keyPerIP)
 
 	h.auditLog(c, "auth.login", "user", user.Username, nil)
+	h.watchLogin(c, user)
 	OK(c, h.loginOKPayload(c, issued, user))
+}
+
+// watchLogin 记录登录 IP，并在首次见到该 IP 时推告警。
+//
+// 两个入口都要调：密码登录（未开 2FA）与 2FA 收尾登录。
+// 漏掉任何一个都会让「开了 2FA 的站长被异地登录」这类最该报的情况静默掉。
+func (h *Handlers) watchLogin(c *gin.Context, user *models.User) {
+	if h.loginWatch == nil || user == nil {
+		return
+	}
+	// 只盯员工账号：买家换 IP 是常态，报了只会淹没真正的异常
+	if !user.IsAdmin() && user.Role != models.RoleOperator {
+		return
+	}
+	h.loginWatch.Record(c.Request.Context(), user, c.ClientIP(), c.Request.UserAgent())
 }
 
 // loginOKPayload 统一构造「登录成功」的响应体。
@@ -197,6 +213,7 @@ func (h *Handlers) loginTOTP(c *gin.Context) {
 	}
 
 	h.auditLog(c, "auth.login_totp", "user", user.Username, gin.H{"recovery_code": usedRecovery})
+	h.watchLogin(c, user)
 	payload := h.loginOKPayload(c, issued, user)
 	if usedRecovery {
 		payload["used_recovery_code"] = true

@@ -115,7 +115,24 @@ type SecuritySettings struct {
 	// AgentSelfApply 是否允许买家自助提交销售申请。
 	// V1 建议 false：早期只放信任的人（设计 §11 第 6 条）。
 	AgentSelfApply bool `json:"agent_self_apply"`
+
+	// ---------- 迭代 5：S2 / S3 ----------
+	//
+	// ConfirmDisabled 关闭「敏感操作二次确认」。默认 false = 要求确认。
+	//
+	// 需确认的动作：新建/修改上游平台、人工调整买家余额、查看卡密明文。
+	// 这几个都不可逆，且后台登录态是长期 JWT —— 手机被人拿到就够了。
+	ConfirmDisabled bool `json:"confirm_disabled"`
+	// LoginAlertDisabled 关闭「新 IP 登录提醒」。默认 false = 提醒。
+	// 关掉后仍会记录 IP（表 user_login_ips），只是不再推告警。
+	LoginAlertDisabled bool `json:"login_alert_disabled"`
 }
+
+// ConfirmOn 是否需要敏感操作二次确认
+func (s SecuritySettings) ConfirmOn() bool { return !s.ConfirmDisabled }
+
+// LoginAlertOn 是否推送新 IP 登录提醒
+func (s SecuritySettings) LoginAlertOn() bool { return !s.LoginAlertDisabled }
 
 // AgentEnabled 阶梯专价是否启用
 func (s SecuritySettings) AgentEnabled() bool { return !s.AgentDisabled }

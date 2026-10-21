@@ -1,4 +1,4 @@
-﻿import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   Alert,
   Button,
@@ -22,7 +22,7 @@ import {
 import type { ColumnsType } from 'antd/es/table';
 import { SafetyOutlined, ReloadOutlined, DeleteOutlined, WarningOutlined } from '@ant-design/icons';
 import { api, toastError } from '@/api/client';
-import type { BlacklistEntry, RiskHit, RiskRule, TOTPSetupResult, TOTPStatus } from '@/api/types';
+import type { BlacklistEntry, RiskHit, RiskRule, SecuritySettings, TOTPSetupResult, TOTPStatus } from '@/api/types';
 import {
   BLACKLIST_KIND_TEXT,
   RISK_ACTION_TEXT,
@@ -726,6 +726,99 @@ function BlacklistPanel() {
   );
 }
 
+// ================================================================ 安全策略（S2 / S3）
+
+/**
+ * 两个「是否有防护」的开关。
+ *
+ * 后端字段是反向命名的（confirm_disabled / login_alert_disabled），
+ * 零值 = 开启防护。这里 UI 上仍用「启用 xxx」正向表达，
+ * 提交时再取反 —— 让运营看到的是「开着/关着」，而不是「没禁用/已禁用」。
+ */
+function SecurityPolicy() {
+  const [security, setSecurity] = useState<SecuritySettings | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await api.settings();
+      setSecurity(res.security ?? null);
+    } catch (e) {
+      toastError(e);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const confirmOn = !(security?.confirm_disabled === true);
+  const alertOn = !(security?.login_alert_disabled === true);
+
+  const patch = async (body: Partial<SecuritySettings>) => {
+    if (!security) return;
+    setSaving(true);
+    try {
+      await api.updateSetting('security', { ...security, ...body });
+      setSecurity({ ...security, ...body });
+      message.success('已保存，立即生效');
+    } catch (e) {
+      toastError(e);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Card title="攻击面收敛" loading={loading}>
+      <Alert
+        type="info"
+        showIcon
+        style={{ marginBottom: 16 }}
+        message="这两项都是「开着更安全、关掉更顺手」的取舍，改动立即生效，不需要重启。"
+      />
+
+      <Space direction="vertical" size={20} style={{ width: '100%' }}>
+        <div>
+          <Space align="center">
+            <Switch
+              checked={confirmOn}
+              loading={saving}
+              onChange={(v) => void patch({ confirm_disabled: !v })}
+            />
+            <Text strong>敏感操作需要再输一次密码</Text>
+          </Space>
+          <Paragraph type="secondary" style={{ margin: '6px 0 0 44px', fontSize: 13 }}>
+            覆盖：新建/修改上游平台、人工调整买家余额、查看卡密明文。
+            确认一次 10 分钟内有效，不用每次都输。
+            关掉后，拿到你已登录浏览器的人可以直接改凭证、调余额、导出卡密。
+          </Paragraph>
+        </div>
+
+        <div>
+          <Space align="center">
+            <Switch
+              checked={alertOn}
+              loading={saving}
+              onChange={(v) => void patch({ login_alert_disabled: !v })}
+            />
+            <Text strong>新 IP 登录后台时通知我</Text>
+          </Space>
+          <Paragraph type="secondary" style={{ margin: '6px 0 0 44px', fontSize: 13 }}>
+            员工账号从没见过的 IP 登录时会推一条告警（站内信 + 已配置的渠道）。
+            每个新 IP 单独推送，不会被聚合窗口合并 —— 否则就看不出是哪个 IP 了。
+            本地回环与内网地址会在文案里注明，避免误判。
+          </Paragraph>
+        </div>
+      </Space>
+    </Card>
+  );
+}
+
 // ================================================================ 页面
 
 export default function Security() {
@@ -738,6 +831,7 @@ export default function Security() {
         defaultActiveKey="account"
         items={[
           { key: 'account', label: '账号安全', children: <AccountSecurity /> },
+          { key: 'policy', label: '安全策略', children: <SecurityPolicy /> },
           { key: 'rules', label: '风控规则', children: <RiskRules /> },
           { key: 'hits', label: '风险命中', children: <RiskHits /> },
           { key: 'blacklist', label: '黑名单', children: <BlacklistPanel /> },

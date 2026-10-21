@@ -1,4 +1,4 @@
-﻿package service
+package service
 
 import (
 	"context"
@@ -60,6 +60,8 @@ func testDB(t *testing.T) *gorm.DB {
 		&models.PriceTier{}, &models.ListingTierPrice{},
 		// 支付相关：settings 存支付配置，payment_orders 存支付单
 		&models.Setting{}, &models.PaymentOrder{},
+		// 迭代 5：新 IP 登录提醒要记录 IP；告警落 notifications
+		&models.UserLoginIP{}, &models.Notification{},
 	); err != nil {
 		t.Fatalf("迁移测试表失败: %v", err)
 	}

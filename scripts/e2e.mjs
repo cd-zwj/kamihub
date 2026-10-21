@@ -23,12 +23,31 @@ function check(name, ok, detail = '') {
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * 敏感操作二次确认票据（后端 S2）。
+ *
+ * 建平台、看卡密明文这类接口现在要求再输一次密码。脚本像真实管理员一样
+ * 先换一张票据，之后所有请求都带上 —— 票据 10 分钟内有效，足够跑完整套。
+ */
+let CONFIRM_TICKET = '';
+
+async function acquireConfirmTicket() {
+  const res = await api('/api/auth/confirm', {
+    method: 'POST',
+    body: { password: ADMIN_PASS },
+    headers: CONFIRM_TICKET ? { 'X-Confirm-Ticket': CONFIRM_TICKET } : {},
+  });
+  CONFIRM_TICKET = res.json?.data?.ticket || '';
+  return CONFIRM_TICKET;
+}
+
 async function api(path, { method = 'GET', body, raw = false, headers = {} } = {}) {
   const res = await fetch(BASE + path, {
     method,
     headers: {
       ...(body ? { 'Content-Type': 'application/json' } : {}),
       ...(TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {}),
+      ...(CONFIRM_TICKET ? { 'X-Confirm-Ticket': CONFIRM_TICKET } : {}),
       ...headers,
     },
     body: body ? JSON.stringify(body) : undefined,
@@ -65,6 +84,23 @@ async function main() {
 
   const me = await api('/api/auth/me');
   check('获取当前用户', me.json?.data?.username === ADMIN_USER);
+
+  // ---------- 1.5 敏感操作二次确认（S2）----------
+  const confirmStatus = await api('/api/auth/confirm/status');
+  check('二次确认状态接口可用', confirmStatus.status === 200,
+    JSON.stringify(confirmStatus.json?.data));
+
+  const confirmWrong = await api('/api/auth/confirm', {
+    method: 'POST', body: { password: 'wrong-password-for-confirm' },
+    headers: { 'X-Confirm-Ticket': '' },
+  });
+  check('确认密码错误被拒', confirmWrong.status === 400,
+    `HTTP ${confirmWrong.status} ${confirmWrong.json?.error_code || ''}`);
+
+  const ticket = await acquireConfirmTicket();
+  check('换取二次确认票据成功', ticket.length > 10, `len=${ticket.length}`);
+
+  // 有票据之后，后面的敏感操作都能正常执行
 
   // ---------- 2. 适配器与策略 ----------
   const adapters = await api('/api/adapters');

@@ -16,12 +16,16 @@ function check(name, ok, detail = '') {
   console.log(`${ok ? 'PASS' : 'FAIL'} ${name}${detail ? `  -- ${detail}` : ''}`);
 }
 
+// 敏感操作二次确认票据（后端 S2）：建平台/卡密明文需要，10 分钟有效
+let CONFIRM_TICKET = '';
+
 async function api(path, { method = 'GET', body } = {}) {
   const res = await fetch(BASE + path, {
     method,
     headers: {
       ...(body ? { 'Content-Type': 'application/json' } : {}),
       ...(TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {}),
+      ...(CONFIRM_TICKET ? { 'X-Confirm-Ticket': CONFIRM_TICKET } : {}),
     },
     body: body ? JSON.stringify(body) : undefined,
   });
@@ -93,6 +97,14 @@ async function main() {
   TOKEN = login.json?.data?.token || '';
   check('管理员登录', Boolean(TOKEN), `status=${login.status}`);
   if (!TOKEN) process.exit(1);
+
+  // 换一张二次确认票据：本脚本要建上游平台（写入凭证），属敏感操作
+  const confirm = await api('/api/auth/confirm', {
+    method: 'POST',
+    body: { password: ADMIN_PASS },
+  });
+  CONFIRM_TICKET = confirm.json?.data?.ticket || '';
+  check('换取二次确认票据', CONFIRM_TICKET.length > 10, `status=${confirm.status}`);
 
   // ---- 2. 建混合模式商品（池子优先），顺手导入 3 张卡密 ----
   const code = `HY-${tag}`;

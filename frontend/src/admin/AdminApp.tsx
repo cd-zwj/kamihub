@@ -1,8 +1,9 @@
-﻿import { Suspense, lazy } from 'react';
+import { Suspense, lazy } from 'react';
 import { Navigate, Route, Routes } from 'react-router-dom';
 import { Spin } from 'antd';
 import { useAuth } from '@/auth/AuthContext';
 import AppLayout from '@/layout/AppLayout';
+import ConfirmPasswordDialog from '@/components/ConfirmPasswordDialog';
 import Login from '@/pages/Login';
 // Dashboard 是唯一引入 recharts 的页面（+130KB gzip）。用 lazy 拆成独立 chunk：
 // 首屏只加载登录页与布局，图表包在真正进入概览时才下载。
@@ -55,28 +56,32 @@ export default function AdminApp() {
   }
 
   return (
-    <Routes>
-      <Route path="/admin/login" element={<Navigate to="/admin" replace />} />
-      <Route element={<AppLayout />}>
-        <Route path="/admin" element={<Suspense fallback={<FullScreenSpin />}><Dashboard /></Suspense>} />
-        <Route path="/admin/orders" element={<Orders />} />
-        <Route path="/admin/deliveries" element={<Deliveries />} />
-        <Route path="/admin/upstream" element={<UpstreamGoods />} />
-        <Route path="/admin/goods" element={<Goods />} />
-        <Route path="/admin/platforms" element={<Platforms />} />
-        <Route path="/admin/logs" element={<Logs />} />
-        {/* 账号安全对所有员工开放：operator 也应该能给自己绑 2FA */}
-        <Route path="/admin/security" element={<Security />} />
-        {/* 以下仅管理员可见，非管理员访问会被兜底路由弹回概览 */}
-        {isAdmin && <Route path="/admin/shop-admin" element={<ShopAdmin />} />}
-        {isAdmin && <Route path="/admin/payment-admin" element={<PaymentAdmin />} />}
-        {isAdmin && <Route path="/admin/agent" element={<AgentAdmin />} />}
-        {isAdmin && <Route path="/admin/users" element={<Users />} />}
-        {isAdmin && <Route path="/admin/tokens" element={<Tokens />} />}
-        {isAdmin && <Route path="/admin/admin-guide" element={<AdminGuide />} />}
-        {isAdmin && <Route path="/admin/settings" element={<Settings />} />}
-        <Route path="*" element={<Navigate to="/admin" replace />} />
-      </Route>
-    </Routes>
+    <>
+      {/* 全局挂一次：敏感操作收到 428 时自动弹密码框并重试 */}
+      <ConfirmPasswordDialog />
+      <Routes>
+        <Route path="/admin/login" element={<Navigate to="/admin" replace />} />
+        <Route element={<AppLayout />}>
+          <Route path="/admin" element={<Suspense fallback={<FullScreenSpin />}><Dashboard /></Suspense>} />
+          <Route path="/admin/orders" element={<Orders />} />
+          <Route path="/admin/deliveries" element={<Deliveries />} />
+          <Route path="/admin/upstream" element={<UpstreamGoods />} />
+          <Route path="/admin/goods" element={<Goods />} />
+          <Route path="/admin/platforms" element={<Platforms />} />
+          <Route path="/admin/logs" element={<Logs />} />
+          {/* 账号安全对所有员工开放：operator 也应该能给自己绑 2FA */}
+          <Route path="/admin/security" element={<Security />} />
+          {/* 以下仅管理员可见，非管理员访问会被兜底路由弹回概览 */}
+          {isAdmin && <Route path="/admin/shop-admin" element={<ShopAdmin />} />}
+          {isAdmin && <Route path="/admin/payment-admin" element={<PaymentAdmin />} />}
+          {isAdmin && <Route path="/admin/agent" element={<AgentAdmin />} />}
+          {isAdmin && <Route path="/admin/users" element={<Users />} />}
+          {isAdmin && <Route path="/admin/tokens" element={<Tokens />} />}
+          {isAdmin && <Route path="/admin/admin-guide" element={<AdminGuide />} />}
+          {isAdmin && <Route path="/admin/settings" element={<Settings />} />}
+          <Route path="*" element={<Navigate to="/admin" replace />} />
+        </Route>
+      </Routes>
+    </>
   );
 }

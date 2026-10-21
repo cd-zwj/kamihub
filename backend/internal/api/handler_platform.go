@@ -99,6 +99,10 @@ type platformUpdateRequest struct {
 }
 
 func (h *Handlers) createPlatform(c *gin.Context) {
+	// 建平台等于写入上游凭证（app_secret 等），属敏感操作
+	if !h.requireConfirm(c) {
+		return
+	}
 	var req platformCreateRequest
 	if !BindJSON(c, &req) {
 		return
@@ -162,6 +166,10 @@ func (h *Handlers) createPlatform(c *gin.Context) {
 }
 
 func (h *Handlers) updatePlatform(c *gin.Context) {
+	// 改平台可能改掉上游凭证，属敏感操作
+	if !h.requireConfirm(c) {
+		return
+	}
 	id, ok := uintParam(c, "id")
 	if !ok {
 		return

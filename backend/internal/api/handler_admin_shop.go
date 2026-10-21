@@ -156,6 +156,10 @@ type adjustBalanceReq struct {
 
 // adjustBuyerBalance 人工调账
 func (h *Handlers) adjustBuyerBalance(c *gin.Context) {
+	// 直接改动买家钱包余额，属最典型的不可逆敏感操作
+	if !h.requireConfirm(c) {
+		return
+	}
 	id, ok := uintParam(c, "id")
 	if !ok {
 		return

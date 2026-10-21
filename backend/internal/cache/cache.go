@@ -7,6 +7,7 @@ package cache
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 
@@ -162,6 +163,27 @@ func (c *Client) Reset(ctx context.Context, keys ...string) {
 // SetNX 简单占位，用于幂等快路径
 func (c *Client) SetNX(ctx context.Context, key string, value string, ttl time.Duration) (bool, error) {
 	return c.rdb.SetNX(ctx, key, value, ttl).Result()
+}
+
+// Set 写入带过期时间的字符串值。ttl<=0 表示不过期。
+func (c *Client) Set(ctx context.Context, key, value string, ttl time.Duration) error {
+	return c.rdb.Set(ctx, key, value, ttl).Err()
+}
+
+// Get 读取字符串值。
+//
+// 键不存在时返回 ("", nil) —— 调用方通常只关心「有没有值」，
+// 让每个调用点都去判断 redis.Nil 是多余的重复。
+// 真正的 Redis 故障才返回错误。
+func (c *Client) Get(ctx context.Context, key string) (string, error) {
+	v, err := c.rdb.Get(ctx, key).Result()
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return "", nil
+		}
+		return "", err
+	}
+	return v, nil
 }
 
 func (c *Client) Del(ctx context.Context, keys ...string) {

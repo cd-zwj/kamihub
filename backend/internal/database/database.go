@@ -109,6 +109,10 @@ func Migrate(db *gorm.DB) error {
 		// price_tier 默认 retail = 原价，与改造前完全一致）。
 		&models.PriceTier{},
 		&models.ListingTierPrice{},
+
+		// ---------- 迭代 5：S2 敏感操作确认 / S3 新 IP 登录提醒 ----------
+		// user_login_ips 是新表，用于记住每个员工账号用过的全部 IP。
+		&models.UserLoginIP{},
 	)
 }
 
