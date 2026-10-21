@@ -87,6 +87,14 @@ func Migrate(db *gorm.DB) error {
 		&models.RechargeCode{},
 		// 第三方支付（易支付）订单，同样是纯新增表
 		&models.PaymentOrder{},
+
+		// ---------- 迭代 1：运维地基 ----------
+		// 全部是新增表，不修改任何现有表结构。
+		// worker_task_runs 记录定时任务执行；reconcile_diffs 记录对账差异；
+		// notifications 是站内信与运维告警的统一落库表。
+		&models.WorkerTaskRun{},
+		&models.ReconcileDiff{},
+		&models.Notification{},
 	)
 }
 

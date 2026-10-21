@@ -2,50 +2,103 @@
 //
 // 启动顺序：加载配置 → 初始化日志 → 连数据库/Redis → 迁移 → 初始化数据
 //
-//	→ 注册平台适配器 → 组装服务 → 挂载路由 → 监听
+//	→ 注册平台适配器 → 组装服务 → 按运行模式启动 HTTP 和/或定时任务
+//
+// 运行模式（-mode 或 APP_MODE）：
+//
+//	all     HTTP + 定时任务（本地开发、小规模单机）
+//	api     只起 HTTP（生产，与 worker 分离）
+//	worker  只跑定时任务（生产，与 api 分离）
+//
+// 为什么要拆：定时任务卡住或崩了不影响买家下单，反之亦然；
+// 两者也能单独重启、单独扩容。拆开后仍然是同一个镜像、同一份代码。
 package main
 
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 
 	"kamihub/internal/api"
 	"kamihub/internal/cache"
 	"kamihub/internal/config"
 	"kamihub/internal/database"
 	"kamihub/internal/logger"
+	"kamihub/internal/notify"
 	"kamihub/internal/platform"
 	"kamihub/internal/platform/f16688"
 	"kamihub/internal/platform/mock"
 	"kamihub/internal/render"
 	"kamihub/internal/routing"
 	"kamihub/internal/service"
+	"kamihub/internal/worker"
 )
 
 func main() {
-	if err := run(); err != nil {
+	mode := flag.String("mode", "", "运行模式：all / api / worker（覆盖 APP_MODE）")
+	flag.Parse()
+
+	if err := run(*mode); err != nil {
 		slog.Error("服务启动失败", "error", err.Error())
 		os.Exit(1)
 	}
 }
 
-func run() error {
+// deps 组装好的依赖。抽出来是为了让「起 HTTP」和「起 worker」共用同一份装配。
+type deps struct {
+	cfg       *config.Config
+	db        *gorm.DB
+	cache     *cache.Client
+	registry  *platform.Registry
+	platforms *service.PlatformService
+	goods     *service.GoodsService
+	cards     *service.CardService
+	orders    *service.OrderService
+	settings  *service.SettingsService
+	audit     *service.AuditService
+	deliveries *service.DeliveryService
+
+	buyerAuth  *service.BuyerAuthService
+	listings   *service.ListingService
+	wallet     *service.WalletService
+	shopOrders *service.ShopOrderService
+	payment    *service.PaymentService
+	reconcile  *service.ReconcileService
+
+	notifier *notify.Notifier
+	renderer *render.Renderer
+	routes   *routing.Registry
+	// workerRunner 定时任务调度器。为 nil 表示当前模式不跑任务。
+	workerRunner *worker.Runner
+}
+
+func run(modeOverride string) error {
 	// ---------- 配置 ----------
 	cfg, err := config.Load()
 	if err != nil {
 		// 此时 logger 还没初始化，直接写 stderr
 		return err
 	}
+	// 命令行 -mode 优先级最高
+	if modeOverride != "" {
+		cfg.App.Mode = modeOverride
+	}
+	if err := cfg.ValidateMode(); err != nil {
+		return err
+	}
+
 	logger.Setup(cfg.App.LogLevel, cfg.IsProduction())
 	if cfg.IsProduction() {
 		gin.SetMode(gin.ReleaseMode)
@@ -53,12 +106,90 @@ func run() error {
 
 	slog.Info("启动 kamihub",
 		"env", cfg.App.Env,
+		"mode", cfg.App.Mode,
 		"port", cfg.App.Port,
 		"base_url", cfg.App.BaseURL,
 		"delivery_ttl", cfg.Delivery.DefaultTTL.String(),
+		"api", cfg.RunsAPI(),
+		"worker", cfg.RunsWorker(),
 	)
 
-	// ---------- 上传目录 ----------
+	// ---------- 装配 ----------
+	d, err := bootstrap(cfg)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if d.cache != nil {
+			_ = d.cache.Close()
+		}
+	}()
+
+	// ---------- 按模式启动 ----------
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, 2)
+
+	if cfg.RunsAPI() {
+		srv, err := startHTTP(d)
+		if err != nil {
+			return err
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-ctx.Done()
+			shutCtx, shutCancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer shutCancel()
+			if err := srv.Shutdown(shutCtx); err != nil {
+				slog.Warn("关闭 HTTP 服务超时", "error", err.Error())
+			}
+			slog.Info("HTTP 服务已关闭")
+		}()
+	}
+
+	if cfg.RunsWorker() {
+		if d.workerRunner == nil {
+			slog.Warn("WORKER_ENABLED=false，worker 将空转不执行任何任务")
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if d.workerRunner == nil {
+				<-ctx.Done()
+				return
+			}
+			if err := d.workerRunner.Start(ctx); err != nil {
+				errCh <- err
+			}
+		}()
+	}
+
+	// ---------- 优雅退出 ----------
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+
+	select {
+	case sig := <-quit:
+		slog.Info("收到退出信号，正在优雅关闭", "signal", sig.String())
+	case err := <-errCh:
+		slog.Error("后台组件异常退出", "error", err.Error())
+		cancel()
+		wg.Wait()
+		return err
+	}
+
+	cancel()
+	wg.Wait()
+	slog.Info("已退出")
+	return nil
+}
+
+// bootstrap 装配全部依赖。api 与 worker 共用。
+func bootstrap(cfg *config.Config) (*deps, error) {
+	// ---------- 上传目录（仅 api 需要）----------
 	// 提前创建并**验证可写**。
 	//
 	// 只 MkdirAll 是不够的：目录可能已存在但属于别的用户
@@ -66,28 +197,30 @@ func run() error {
 	// 而进程以非 root 的 app 用户运行）。
 	// 那种情况下要等运营真正上传图片才会报错，排查成本高；
 	// 这里在启动阶段就写一个探针文件，问题当场暴露。
-	if err := ensureWritableDir(cfg.Upload.Dir); err != nil {
-		return fmt.Errorf("上传目录不可写 %s: %w", cfg.Upload.Dir, err)
+	if cfg.RunsAPI() {
+		if err := ensureWritableDir(cfg.Upload.Dir); err != nil {
+			return nil, fmt.Errorf("上传目录不可写 %s: %w", cfg.Upload.Dir, err)
+		}
+		slog.Info("上传目录就绪", "dir", cfg.Upload.Dir, "max_mb", cfg.Upload.MaxSizeMB)
 	}
-	slog.Info("上传目录就绪", "dir", cfg.Upload.Dir, "max_mb", cfg.Upload.MaxSizeMB)
 
 	// ---------- 数据库 ----------
 	db, err := database.Connect(cfg)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	slog.Info("数据库连接成功")
 
 	if cfg.App.AutoMigrate {
 		if err := database.Migrate(db); err != nil {
-			return err
+			return nil, err
 		}
 		slog.Info("数据库迁移完成")
 	}
 
 	seed, err := database.Seed(db, cfg)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if seed.AdminCreated {
 		if seed.AdminPassword != "" {
@@ -102,7 +235,6 @@ func run() error {
 
 	// ---------- Redis ----------
 	c := cache.New(cfg)
-	defer func() { _ = c.Close() }()
 
 	// ---------- 平台适配器注册 ----------
 	registry := platform.NewRegistry()
@@ -110,6 +242,9 @@ func run() error {
 	registry.Register(mock.New())
 	// 新增平台在这里注册即可，上层业务无需改动
 	slog.Info("已注册平台适配器", "codes", registry.Codes())
+
+	// ---------- 通知 ----------
+	notifier := buildNotifier(db, cfg)
 
 	// ---------- 服务组装 ----------
 	routes := routing.NewRegistry()
@@ -120,7 +255,6 @@ func run() error {
 	goods := service.NewGoodsService(db, platforms, cards, cfg.Upstream.VerifySupply)
 	deliveries := service.NewDeliveryService(db, cfg, settings)
 	orders := service.NewOrderService(db, cfg, c, platforms, settings, deliveries, routes, cards)
-	auth := service.NewAuthService(db, cfg, settings)
 	audit := service.NewAuditService(db)
 
 	// ---------- C 端购买平台 ----------
@@ -134,34 +268,125 @@ func run() error {
 	// 填好商户参数并打开开关后才会对买家可见。
 	payment := service.NewPaymentService(db, cfg, settings, wallet)
 
-	renderer, err := render.New()
-	if err != nil {
-		return err
+	// ---------- 对账 ----------
+	reconcileCfg := service.DefaultReconcileConfig()
+	reconcile := service.NewReconcileService(db, platforms, reconcileCfg)
+
+	// ---------- 提货页渲染（仅 api 需要）----------
+	var renderer *render.Renderer
+	if cfg.RunsAPI() {
+		renderer, err = render.New()
+		if err != nil {
+			_ = c.Close()
+			return nil, err
+		}
 	}
+
+	// ---------- 定时任务（仅 worker 需要）----------
+	// 在装配阶段构造好，main 只负责 Start；
+	// 同时挂到 HTTP 上，后台可手动触发单次执行（运维排障用）。
+	var workerRunner *worker.Runner
+	if cfg.RunsWorker() && cfg.Worker.Enabled {
+		tasks := worker.BuildTasks(db, cfg, worker.Services{
+			Platforms: platforms,
+			Goods:     goods,
+			Orders:    orders,
+			Payment:   payment,
+			Reconcile: reconcile,
+		}, notifier)
+		workerRunner = worker.New(worker.Deps{DB: db, Notify: notifier, Tasks: tasks})
+		slog.Info("定时任务已装配", "count", len(tasks))
+	}
+
+	return &deps{
+		cfg:          cfg,
+		db:           db,
+		cache:        c,
+		registry:     registry,
+		platforms:    platforms,
+		goods:        goods,
+		cards:        cards,
+		orders:       orders,
+		settings:     settings,
+		audit:        audit,
+		deliveries:   deliveries,
+		buyerAuth:    buyerAuth,
+		listings:     listings,
+		wallet:       wallet,
+		shopOrders:   shopOrders,
+		payment:      payment,
+		reconcile:    reconcile,
+		notifier:     notifier,
+		renderer:     renderer,
+		routes:       routes,
+		workerRunner: workerRunner,
+	}, nil
+}
+
+// buildNotifier 按配置装配通知渠道。
+func buildNotifier(db *gorm.DB, cfg *config.Config) *notify.Notifier {
+	n := notify.New(db, notify.Config{
+		AggregateWindow: cfg.Notify.AggregateWindow,
+		QuietStart:      cfg.Notify.QuietStart,
+		QuietEnd:        cfg.Notify.QuietEnd,
+		Timeout:         10 * time.Second,
+	})
+
+	if !cfg.Notify.Enabled {
+		slog.Warn("通知总开关已关闭（NOTIFY_ENABLED=false），告警只写站内信")
+		return n
+	}
+
+	if cfg.Notify.TelegramBotToken != "" && cfg.Notify.TelegramChatID != "" {
+		n.Register(&notify.TelegramChannel{
+			BotToken: cfg.Notify.TelegramBotToken,
+			ChatID:   cfg.Notify.TelegramChatID,
+		})
+	}
+	if cfg.Notify.WebhookURL != "" {
+		n.Register(&notify.WebhookChannel{
+			URL:    cfg.Notify.WebhookURL,
+			Secret: cfg.Notify.WebhookSecret,
+			Format: cfg.Notify.WebhookFormat,
+		})
+	}
+
+	if len(n.Channels()) == 0 {
+		slog.Warn("未配置任何外部通知渠道，告警只写站内信（后台可见）")
+	}
+	return n
+}
+
+// startHTTP 构造并启动 HTTP 服务。
+func startHTTP(d *deps) (*http.Server, error) {
+	cfg := d.cfg
 
 	handlers := api.NewHandlers(api.Deps{
 		Config:     cfg,
-		DB:         db,
-		Cache:      c,
-		Auth:       auth,
-		Platforms:  platforms,
-		Goods:      goods,
-		Cards:      cards,
-		Orders:     orders,
-		Deliveries: deliveries,
-		Settings:   settings,
-		Audit:      audit,
-		Routes:     routes,
-		Renderer:   renderer,
+		DB:         d.db,
+		Cache:      d.cache,
+		Auth:       d.auditServiceAuth(),
+		Platforms:  d.platforms,
+		Goods:      d.goods,
+		Cards:      d.cards,
+		Orders:     d.orders,
+		Deliveries: d.deliveries,
+		Settings:   d.settings,
+		Audit:      d.audit,
+		Routes:     d.routes,
+		Renderer:   d.renderer,
 
-		BuyerAuth:  buyerAuth,
-		Listings:   listings,
-		Wallet:     wallet,
-		ShopOrders: shopOrders,
-		Payment:    payment,
+		BuyerAuth:  d.buyerAuth,
+		Listings:   d.listings,
+		Wallet:     d.wallet,
+		ShopOrders: d.shopOrders,
+		Payment:    d.payment,
+
+		Reconcile:    d.reconcile,
+		Notify:       d.notifier,
+		WorkerRunner: d.workerRunner,
 	})
 
-	// ---------- HTTP ----------
 	engine := gin.New()
 	if cfg.App.TrustProxy {
 		// 请求链路：外层 Nginx(宿主) -> web 容器内的 Nginx -> 本进程。
@@ -177,7 +402,7 @@ func run() error {
 			"172.16.0.0/12",
 			"192.168.0.0/16",
 		}); err != nil {
-			return fmt.Errorf("设置可信代理失败: %w", err)
+			return nil, fmt.Errorf("设置可信代理失败: %w", err)
 		}
 	}
 	handlers.Register(engine)
@@ -199,19 +424,12 @@ func run() error {
 		}
 	}()
 
-	// ---------- 优雅退出 ----------
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
+	return srv, nil
+}
 
-	slog.Info("收到退出信号，正在优雅关闭")
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	if err := srv.Shutdown(ctx); err != nil {
-		slog.Warn("关闭 HTTP 服务超时", "error", err.Error())
-	}
-	slog.Info("已退出")
-	return nil
+// auditServiceAuth 兼容 api.Deps 里的 Auth 字段。
+func (d *deps) auditServiceAuth() *service.AuthService {
+	return service.NewAuthService(d.db, d.cfg, d.settings)
 }
 
 // ensureWritableDir 创建目录并实际写一个探针文件，确认进程有写权限。

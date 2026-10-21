@@ -23,6 +23,61 @@ type Config struct {
 	Delivery Delivery
 	Upstream Upstream
 	Upload   Upload
+	Worker   Worker
+	Notify   Notify
+}
+
+// 运行模式
+const (
+	// ModeAll HTTP + 定时任务（本地开发、小规模单机）
+	ModeAll = "all"
+	// ModeAPI 只起 HTTP
+	ModeAPI = "api"
+	// ModeWorker 只跑定时任务
+	ModeWorker = "worker"
+)
+
+// Worker 后台定时任务配置。
+//
+// 拆出独立进程的价值：定时任务卡住或崩了不影响买家下单，反之亦然；
+// 也能单独重启、单独扩容。
+type Worker struct {
+	// Enabled 关掉后 worker 进程只做空转（便于维护窗口）
+	Enabled bool
+	// 各任务执行间隔
+	StockInterval     time.Duration
+	BalanceInterval   time.Duration
+	PaymentInterval   time.Duration
+	OrderInterval     time.Duration
+	ReconcileInterval time.Duration
+	// TaskTimeout 单次执行超时
+	TaskTimeout time.Duration
+	// BalanceLow 平台余额预警阈值（元）。低于该值触发告警。
+	BalanceLow float64
+	// StaleMinutes 订单卡在 purchasing 超过该分钟数即视为卡单
+	StaleMinutes int
+}
+
+// Notify 通知渠道配置。
+//
+// 渠道参数走环境变量而不是 settings 表：告警通道属于「部署配置」，
+// 应该在部署时确定，而不是让运营在后台误改导致告警静默。
+type Notify struct {
+	// Enabled 总开关
+	Enabled bool
+	// Telegram
+	TelegramBotToken string
+	TelegramChatID   string
+	// Webhook
+	WebhookURL    string
+	WebhookSecret string
+	// WebhookFormat raw / feishu / dingtalk / wecom
+	WebhookFormat string
+	// AggregateWindow 同类事件聚合窗口
+	AggregateWindow time.Duration
+	// QuietStart / QuietEnd 静默期（小时，左闭右开）
+	QuietStart int
+	QuietEnd   int
 }
 
 // Upload 商品图片上传。
@@ -41,6 +96,8 @@ type Upload struct {
 
 type App struct {
 	Env         string // development / production
+	// Mode 运行模式：all / api / worker
+	Mode        string
 	Port        int
 	BaseURL     string // 对外访问地址，用于拼提货链接，如 https://api.example.com
 	LogLevel    string
@@ -109,6 +166,29 @@ type Upstream struct {
 
 func (c *Config) IsProduction() bool { return c.App.Env == "production" }
 
+// ValidateMode 校验运行模式。
+//
+// 单独暴露是因为命令行 -mode 可以覆盖 APP_MODE，
+// 覆盖后必须重新校验一次，否则会带着非法值跑起来。
+func (c *Config) ValidateMode() error {
+	switch c.App.Mode {
+	case ModeAll, ModeAPI, ModeWorker:
+		return nil
+	default:
+		return fmt.Errorf("APP_MODE 非法：%q（可选 all / api / worker）", c.App.Mode)
+	}
+}
+
+// RunsAPI 该模式是否需要起 HTTP 服务
+func (c *Config) RunsAPI() bool {
+	return c.App.Mode == ModeAll || c.App.Mode == ModeAPI
+}
+
+// RunsWorker 该模式是否需要跑定时任务
+func (c *Config) RunsWorker() bool {
+	return c.App.Mode == ModeAll || c.App.Mode == ModeWorker
+}
+
 // Load 读取环境变量并校验。
 //
 // 会先尝试加载当前目录下的 .env / .env.local（本地开发用），
@@ -120,6 +200,7 @@ func Load() (*Config, error) {
 	cfg := &Config{
 		App: App{
 			Env:                  env("APP_ENV", "production"),
+			Mode:                 env("APP_MODE", ModeAll),
 			Port:                 envInt("APP_PORT", 8080),
 			BaseURL:              strings.TrimRight(env("APP_BASE_URL", "http://localhost:8080"), "/"),
 			LogLevel:             env("LOG_LEVEL", "info"),
@@ -165,6 +246,28 @@ func Load() (*Config, error) {
 			MaxSizeMB: envInt("UPLOAD_MAX_MB", 5),
 			URLPrefix: "/uploads",
 		},
+		Worker: Worker{
+			Enabled:           envBool("WORKER_ENABLED", true),
+			StockInterval:     envDuration("WORKER_STOCK_INTERVAL", 2*time.Minute),
+			BalanceInterval:   envDuration("WORKER_BALANCE_INTERVAL", 5*time.Minute),
+			PaymentInterval:   envDuration("WORKER_PAYMENT_INTERVAL", 1*time.Minute),
+			OrderInterval:     envDuration("WORKER_ORDER_INTERVAL", 2*time.Minute),
+			ReconcileInterval: envDuration("WORKER_RECONCILE_INTERVAL", time.Hour),
+			TaskTimeout:       envDuration("WORKER_TASK_TIMEOUT", 5*time.Minute),
+			BalanceLow:        envFloat("WORKER_BALANCE_LOW", 100),
+			StaleMinutes:      envInt("WORKER_STALE_MINUTES", 10),
+		},
+		Notify: Notify{
+			Enabled:          envBool("NOTIFY_ENABLED", true),
+			TelegramBotToken: env("NOTIFY_TELEGRAM_BOT_TOKEN", ""),
+			TelegramChatID:   env("NOTIFY_TELEGRAM_CHAT_ID", ""),
+			WebhookURL:       env("NOTIFY_WEBHOOK_URL", ""),
+			WebhookSecret:    env("NOTIFY_WEBHOOK_SECRET", ""),
+			WebhookFormat:    env("NOTIFY_WEBHOOK_FORMAT", "raw"),
+			AggregateWindow:  envDuration("NOTIFY_AGGREGATE_WINDOW", 5*time.Minute),
+			QuietStart:       envInt("NOTIFY_QUIET_START", 2),
+			QuietEnd:         envInt("NOTIFY_QUIET_END", 7),
+		},
 	}
 
 	if err := cfg.validate(); err != nil {
@@ -206,6 +309,26 @@ func (c *Config) validate() error {
 
 	if c.Upload.MaxSizeMB < 1 || c.Upload.MaxSizeMB > 50 {
 		problems = append(problems, fmt.Sprintf("UPLOAD_MAX_MB 需在 1~50 之间，当前 %d", c.Upload.MaxSizeMB))
+	}
+
+	switch c.App.Mode {
+	case ModeAll, ModeAPI, ModeWorker:
+		// ok
+	default:
+		problems = append(problems, fmt.Sprintf("APP_MODE 非法：%q（可选 all / api / worker）", c.App.Mode))
+	}
+
+	if c.Worker.StockInterval <= 0 {
+		problems = append(problems, "WORKER_STOCK_INTERVAL 必须大于 0")
+	}
+	if c.Worker.TaskTimeout <= 0 {
+		problems = append(problems, "WORKER_TASK_TIMEOUT 必须大于 0")
+	}
+	if c.Worker.StaleMinutes <= 0 {
+		problems = append(problems, "WORKER_STALE_MINUTES 必须大于 0")
+	}
+	if c.Notify.QuietStart < 0 || c.Notify.QuietStart > 23 || c.Notify.QuietEnd < 0 || c.Notify.QuietEnd > 23 {
+		problems = append(problems, "NOTIFY_QUIET_START / NOTIFY_QUIET_END 需在 0~23 之间")
 	}
 
 	if len(problems) > 0 {
@@ -276,6 +399,18 @@ func envDuration(key string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	v, err := time.ParseDuration(strings.TrimSpace(raw))
+	if err != nil {
+		return fallback
+	}
+	return v
+}
+
+func envFloat(key string, fallback float64) float64 {
+	raw, ok := os.LookupEnv(key)
+	if !ok || strings.TrimSpace(raw) == "" {
+		return fallback
+	}
+	v, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
 	if err != nil {
 		return fallback
 	}

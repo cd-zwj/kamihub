@@ -9,9 +9,11 @@ import (
 
 	"kamihub/internal/cache"
 	"kamihub/internal/config"
+	"kamihub/internal/notify"
 	"kamihub/internal/render"
 	"kamihub/internal/routing"
 	"kamihub/internal/service"
+	"kamihub/internal/worker"
 )
 
 // Handlers 汇总所有依赖。
@@ -37,6 +39,11 @@ type Handlers struct {
 	wallet     *service.WalletService
 	shopOrders *service.ShopOrderService
 	payment    *service.PaymentService
+
+	// ---------- 迭代 1：运维地基 ----------
+	reconcile *service.ReconcileService
+	notifier  *notify.Notifier
+	worker    *worker.Runner
 }
 
 // Deps 构造依赖
@@ -61,6 +68,11 @@ type Deps struct {
 	Wallet     *service.WalletService
 	ShopOrders *service.ShopOrderService
 	Payment    *service.PaymentService
+
+	// ---------- 迭代 1：运维地基 ----------
+	Reconcile    *service.ReconcileService
+	Notify       *notify.Notifier
+	WorkerRunner *worker.Runner
 }
 
 func NewHandlers(d Deps) *Handlers {
@@ -73,6 +85,8 @@ func NewHandlers(d Deps) *Handlers {
 		buyerAuth: d.BuyerAuth, listings: d.Listings,
 		wallet: d.Wallet, shopOrders: d.ShopOrders,
 		payment: d.Payment,
+
+		reconcile: d.Reconcile, notifier: d.Notify, worker: d.WorkerRunner,
 	}
 }
 
@@ -263,6 +277,26 @@ func (h *Handlers) Register(r *gin.Engine) {
 
 		// 图片上传（商品封面等）
 		admin.POST("/upload/image", h.uploadImage)
+
+		// ---------- 迭代 1：运维地基 ----------
+		// 定时任务：查看执行记录 + 手动触发（排障用）
+		admin.GET("/workers/tasks", h.listWorkerTasks)
+		admin.GET("/workers/runs", h.listWorkerRuns)
+		admin.POST("/workers/:task/run", h.runWorkerTask)
+
+		// 对账：差异查看、标记已处理、手动触发
+		admin.GET("/reconcile/diffs", h.listReconcileDiffs)
+		admin.POST("/reconcile/diffs/:id/resolve", h.resolveReconcileDiff)
+		admin.POST("/reconcile/run", h.runReconcile)
+
+		// 运维告警 / 站内信
+		admin.GET("/notifications", h.listNotifications)
+		admin.POST("/notifications/:id/read", h.readNotification)
+		admin.POST("/notifications/read-all", h.readAllNotifications)
+
+		// 通知渠道状态与测试
+		admin.GET("/notify/status", h.notifyStatus)
+		admin.POST("/notify/test", h.testNotify)
 	}
 
 	r.NoRoute(func(c *gin.Context) {

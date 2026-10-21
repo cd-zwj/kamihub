@@ -74,10 +74,10 @@ func (a *Adapter) Build(cfg platform.ClientConfig) (platform.Client, error) {
 	o.apply(cfg.Extra)
 
 	return &Client{
-		name:      cfg.PlatformName,
-		opts:      o,
-		onCall:    cfg.OnCall,
-		quoteHits: map[string]int{},
+		name:   cfg.PlatformName,
+		opts:   o,
+		onCall: cfg.OnCall,
+		store:  storeFor(cfg.PlatformID),
 	}, nil
 }
 
@@ -127,14 +127,53 @@ func (o *options) apply(extra map[string]any) {
 }
 
 // Client 模拟客户端
+//
+// 订单状态存在**包级 store**里（按平台 ID 隔离），而不是实例字段。
+//
+// 为什么必须这样：PlatformService.ClientByID 每次调用都会 Build 一个
+// 全新的 Client 实例。若订单存在实例上，「下单」和之后的「查单 / 重查补偿」
+// 会落在两个不同实例上，查单必然报「订单不存在」。
+// 真实上游是服务端有状态，mock 必须模拟这一点，否则卡单补偿、
+// 对账这类跨请求链路根本没法在本地验证。
 type Client struct {
 	name   string
 	opts   options
 	onCall func(platform.CallRecord)
+	store  *orderStore
+}
 
-	mu        sync.Mutex
-	orders    map[string]*platform.PurchaseResult
-	quoteHits map[string]int
+// orderStore 某个平台实例的订单存储（跨 Client 实例共享）
+type orderStore struct {
+	mu     sync.Mutex
+	orders map[string]*platform.PurchaseResult
+	hits   map[string]int
+}
+
+var (
+	storeMu sync.Mutex
+	stores  = map[uint]*orderStore{}
+)
+
+// storeFor 取（或创建）某平台的订单存储。
+func storeFor(platformID uint) *orderStore {
+	storeMu.Lock()
+	defer storeMu.Unlock()
+	s, ok := stores[platformID]
+	if !ok {
+		s = &orderStore{
+			orders: map[string]*platform.PurchaseResult{},
+			hits:   map[string]int{},
+		}
+		stores[platformID] = s
+	}
+	return s
+}
+
+// ResetStore 清空某平台的模拟订单。仅测试用。
+func ResetStore(platformID uint) {
+	storeMu.Lock()
+	delete(stores, platformID)
+	storeMu.Unlock()
 }
 
 func (c *Client) emit(action string, ok bool, errMsg string) {
@@ -283,13 +322,10 @@ func (c *Client) Purchase(ctx context.Context, req platform.PurchaseRequest) (*p
 		res.DeliveredAt = &now
 	}
 
-	c.mu.Lock()
-	if c.orders == nil {
-		c.orders = map[string]*platform.PurchaseResult{}
-	}
-	c.orders[tradeNo] = res
-	c.quoteHits[tradeNo] = 0
-	c.mu.Unlock()
+	c.store.mu.Lock()
+	c.store.orders[tradeNo] = res
+	c.store.hits[tradeNo] = 0
+	c.store.mu.Unlock()
 
 	c.emit("purchase.create", true, "")
 	return res, nil
@@ -297,18 +333,18 @@ func (c *Client) Purchase(ctx context.Context, req platform.PurchaseRequest) (*p
 
 func (c *Client) QueryOrder(ctx context.Context, tradeNo string) (*platform.PurchaseResult, error) {
 	c.delay()
-	c.mu.Lock()
-	res, ok := c.orders[tradeNo]
+	c.store.mu.Lock()
+	res, ok := c.store.orders[tradeNo]
 	if !ok {
-		c.mu.Unlock()
+		c.store.mu.Unlock()
 		c.emit("purchase.query", false, "订单不存在")
 		return nil, platform.NewFatal("模拟平台未找到该订单", "MOCK_NOT_FOUND")
 	}
-	c.quoteHits[tradeNo]++
-	hits := c.quoteHits[tradeNo]
+	c.store.hits[tradeNo]++
+	hits := c.store.hits[tradeNo]
 	opts := c.opts
 	copied := *res
-	c.mu.Unlock()
+	c.store.mu.Unlock()
 
 	c.emit("purchase.query", true, "")
 
