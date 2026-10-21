@@ -1,0 +1,118 @@
+[
+  {
+    "name": "商品列表（含空字符串）",
+    "path": "/openApi/goods/list",
+    "app_id": "test_app_001",
+    "timestamp": "1710000000",
+    "nonce": "AbCdEfGhIjKlMnOpQrStUvWxYz012345",
+    "secret": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "params": { "page_no": 1, "page_size": 20, "keywords": "", "source": "" }
+  },
+  {
+    "name": "空数组参与签名",
+    "path": "/openApi/complaint/sendMessage",
+    "app_id": "test_app_001",
+    "timestamp": "1710000001",
+    "nonce": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+    "secret": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "params": { "complaint_no": "SC26031601", "content": "请重新发货", "images": [] }
+  },
+  {
+    "name": "布尔值与数组",
+    "path": "/openApi/stockSecret/setFirst",
+    "app_id": "test_app_001",
+    "timestamp": "1710000002",
+    "nonce": "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
+    "secret": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "params": { "goods_no": "G10001", "ids": [10001, 10002], "first": 1, "enabled": false }
+  },
+  {
+    "name": "数组顺序 3,1,2",
+    "path": "/openApi/stockSecret/invalidate",
+    "app_id": "test_app_001",
+    "timestamp": "1710000003",
+    "nonce": "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD",
+    "secret": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "params": { "goods_no": "G10001", "ids": [3, 1, 2], "invalid_reason": "" }
+  },
+  {
+    "name": "数组顺序 1,2,3",
+    "path": "/openApi/stockSecret/invalidate",
+    "app_id": "test_app_001",
+    "timestamp": "1710000003",
+    "nonce": "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD",
+    "secret": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "params": { "goods_no": "G10001", "ids": [1, 2, 3], "invalid_reason": "" }
+  },
+  {
+    "name": "数字类型（整数与小数）",
+    "path": "/openApi/goods/create",
+    "app_id": "test_app_001",
+    "timestamp": "1710000004",
+    "nonce": "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE",
+    "secret": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "params": { "name": "本地卡密商品", "price": 10.5, "limit_quantity": 1, "sort": 0, "ratio": 0.125 }
+  },
+  {
+    "name": "中文与特殊字符不转义",
+    "path": "/openApi/goods/create",
+    "app_id": "test_app_001",
+    "timestamp": "1710000005",
+    "nonce": "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF",
+    "secret": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "params": {
+      "name": "测试商品<卡密>",
+      "image": "https://example.com/a.png?x=1&y=2",
+      "description": "中文说明：包含 & < > 等字符"
+    }
+  },
+  {
+    "name": "嵌套对象键排序",
+    "path": "/openApi/purchase/applyComplaint",
+    "app_id": "test_app_001",
+    "timestamp": "1710000006",
+    "nonce": "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG",
+    "secret": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "params": {
+      "trade_no": "T2603161200001",
+      "reason": "卡密无法使用",
+      "meta": { "z": 1, "a": 2 }
+    }
+  },
+  {
+    "name": "驼峰路径转小写",
+    "path": "/openApi/stockSecret/invalidateAll",
+    "app_id": "test_app_001",
+    "timestamp": "1710000007",
+    "nonce": "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH",
+    "secret": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "params": { "goods_no": "G10001", "invalid_reason": "违规" }
+  },
+  {
+    "name": "仅公共参数",
+    "path": "/openApi/merchant/balance",
+    "app_id": "test_app_001",
+    "timestamp": "1710000008",
+    "nonce": "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII",
+    "secret": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "params": {}
+  },
+  {
+    "name": "另一个 64 位密钥",
+    "path": "/openApi/order/info",
+    "app_id": "test_app_001",
+    "timestamp": "1710000009",
+    "nonce": "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ",
+    "secret": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+    "params": { "trade_no": "T2603161200001" }
+  },
+  {
+    "name": "订单列表（近 6 个月）",
+    "path": "/openApi/order/list",
+    "app_id": "test_app_002",
+    "timestamp": "1710000010",
+    "nonce": "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK",
+    "secret": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "params": { "page_no": 1, "page_size": 20, "status": "", "platform": "", "keywords": "", "card_no": "" }
+  }
+]

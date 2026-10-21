@@ -1,0 +1,52 @@
+# ---------------------------------------------------------------- 环境与密钥（绝不入库）
+# 生产密钥文件：一旦泄漏必须立即轮换 JWT_SECRET / ENCRYPTION_KEY / DB 密码
+# 注意：必须显式列出，因为 `.env` 只精确匹配该文件名，不覆盖 .env.xxx
+.env.production-do-not-use
+.env
+.env.*
+!.env.example
+backend/.env
+backend/.env.dev
+backend/.env.local
+backend/.env.production*
+frontend/.env
+frontend/.env.*
+
+# ---------------------------------------------------------------- 依赖与构建产物
+node_modules/
+frontend/node_modules/
+frontend/dist/
+.esbuild-tmp/
+*.tsbuildinfo
+backend/kamihub
+backend/kamihub.exe
+backend/server
+backend/server.exe
+*.exe
+*.exe~
+*.test
+*.out
+
+# ---------------------------------------------------------------- 运行时数据
+backend/data/
+backend/data/uploads/
+data/
+*.log
+logs/
+
+# ---------------------------------------------------------------- 备份文件
+*.bak
+*.bak-*
+*.orig
+*~
+
+# ---------------------------------------------------------------- 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------------------------------------------------------------- 临时文件
+*.tmp
+*.swp
