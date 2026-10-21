@@ -86,6 +86,10 @@ type deps struct {
 	captcha *service.CaptchaService
 	risk    *service.RiskService
 
+	// ---------- 迭代 3：销售阶梯专价 ----------
+	pricing *service.PricingService
+	agent   *service.AgentService
+
 	// workerRunner 定时任务调度器。为 nil 表示当前模式不跑任务。
 	workerRunner *worker.Runner
 }
@@ -287,6 +291,22 @@ func bootstrap(cfg *config.Config) (*deps, error) {
 		slog.Error("播种默认风控规则失败", "error", err.Error())
 	}
 
+	// ---------- 迭代 3：销售阶梯专价 ----------
+	// 费率取自 PAY_FEE_RATE（默认 0.0025），保底公式依赖它。
+	pricingSvc := service.NewPricingService(db, cfg.Pricing.FeeRate)
+	if err := pricingSvc.SeedDefaultTiers(context.Background()); err != nil {
+		slog.Error("播种默认档位失败", "error", err.Error())
+	}
+	agentSvc := service.NewAgentService(db, pricingSvc).
+		WithSwitch(func(ctx context.Context) bool {
+			return settings.Security(ctx).AgentEnabled()
+		})
+	// 把档位定价装配进 ListingService —— 不装配时所有买家按零售价，
+	// 这是「阶梯专价总开关关闭」时的等价行为。
+	listings.WithPricing(pricingSvc)
+	slog.Info("阶梯专价已装配", "fee_rate", cfg.Pricing.FeeRate,
+		"enabled", agentSvc.Enabled(context.Background()))
+
 	// ---------- 提货页渲染（仅 api 需要）----------
 	var renderer *render.Renderer
 	if cfg.RunsAPI() {
@@ -308,6 +328,7 @@ func bootstrap(cfg *config.Config) (*deps, error) {
 			Orders:    orders,
 			Payment:   payment,
 			Reconcile: reconcile,
+			Agent:     agentSvc,
 		}, notifier)
 		workerRunner = worker.New(worker.Deps{DB: db, Notify: notifier, Tasks: tasks})
 		slog.Info("定时任务已装配", "count", len(tasks))
@@ -335,6 +356,8 @@ func bootstrap(cfg *config.Config) (*deps, error) {
 		totp:         totpSvc,
 		captcha:      captchaSvc,
 		risk:         riskSvc,
+		pricing:      pricingSvc,
+		agent:        agentSvc,
 		renderer:     renderer,
 		routes:       routes,
 		workerRunner: workerRunner,
@@ -407,6 +430,9 @@ func startHTTP(d *deps) (*http.Server, error) {
 		TOTP:    d.totp,
 		Captcha: d.captcha,
 		Risk:    d.risk,
+
+		Pricing: d.pricing,
+		Agent:   d.agent,
 	})
 
 	engine := gin.New()

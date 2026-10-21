@@ -27,6 +27,8 @@ export default function ShopLayout() {
     { key: '/', label: '全部商品' },
     { key: '/orders', label: '我的订单' },
     { key: '/wallet', label: '我的钱包' },
+    // 销售中心：普通买家点进去看到的是「申请开通」页，不影响转化
+    { key: '/agent', label: '销售中心' },
   ];
 
   return (

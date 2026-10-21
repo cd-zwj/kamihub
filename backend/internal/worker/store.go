@@ -26,11 +26,13 @@ func taskRunRow(task string, started, finished time.Time, ok bool, res Result, e
 
 // 任务名常量。后台与前端共用这套标识。
 const (
-	TaskStockSync      = "stock_sync"
-	TaskBalanceSync    = "balance_sync"
-	TaskExpirePayment  = "expire_payment"
-	TaskStaleOrder     = "stale_order"
-	TaskReconcile      = "reconcile"
+	TaskStockSync     = "stock_sync"
+	TaskBalanceSync   = "balance_sync"
+	TaskExpirePayment = "expire_payment"
+	TaskStaleOrder    = "stale_order"
+	TaskReconcile     = "reconcile"
+	// TaskTierRecalc 销售档位重算（迭代 3）。每天跑一次，不必实时。
+	TaskTierRecalc = "tier_recalc"
 )
 
 // 各任务的 advisory lock key。
@@ -41,4 +43,5 @@ const (
 	lockKeyExpirePayment int64 = 910003
 	lockKeyStaleOrder    int64 = 910004
 	lockKeyReconcile     int64 = 910005
+	lockKeyTierRecalc    int64 = 910006
 )

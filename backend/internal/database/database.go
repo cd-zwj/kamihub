@@ -103,6 +103,12 @@ func Migrate(db *gorm.DB) error {
 		&models.RiskRule{},
 		&models.RiskHit{},
 		&models.Blacklist{},
+
+		// ---------- 迭代 3：销售阶梯专价 ----------
+		// 两张新表；buyers 上是新增列（都带默认值，历史买家不受影响，
+		// price_tier 默认 retail = 原价，与改造前完全一致）。
+		&models.PriceTier{},
+		&models.ListingTierPrice{},
 	)
 }
 

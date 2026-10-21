@@ -161,6 +161,58 @@ export const RISK_ACTION_TEXT: Record<string, string> = {
   reject: '拒绝',
 };
 
+// ---------------------------------------------------------------- 迭代 3：销售阶梯专价
+
+/** 后台档位配置 */
+export interface AdminPriceTier {
+  id: number;
+  code: string;
+  name: string;
+  min_monthly_orders: number;
+  min_monthly_amount: string;
+  discount_rate: string;
+  min_margin_rate: string;
+  min_retail_price: string;
+  sort_order: number;
+  enabled: boolean;
+  remark: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** 后台销售列表一行（买家信息 + 30 天销量） */
+export interface AdminAgentRow extends User {
+  price_tier: string;
+  agent_status: number;
+  agent_bound_at?: string | null;
+  agent_remark: string;
+  tier_calc_at?: string | null;
+  tier_grace_until?: string | null;
+  orders_30d: number;
+  amount_30d: string;
+}
+
+/** 商品级专价覆盖 */
+export interface AdminTierPrice {
+  id: number;
+  listing_id: number;
+  tier_code: string;
+  price: string;
+}
+
+/** 销售资格状态 */
+export const AGENT_STATUS_TEXT: Record<number, string> = {
+  0: '未开通',
+  1: '正常',
+  2: '已冻结',
+};
+
+export const AGENT_STATUS_COLOR: Record<number, string> = {
+  0: 'default',
+  1: 'green',
+  2: 'red',
+};
+
 export interface CredentialField {
   key: string;
   label: string;
@@ -458,6 +510,12 @@ export interface SecuritySettings {
   order_captcha_mode: 'off' | 'review' | 'always' | string;
   /** 验证码类型：arithmetic（内置）/ geetest / turnstile */
   captcha_provider: string;
+
+  // ---------- 迭代 3：销售阶梯专价 ----------
+  /** 关闭阶梯专价（反向字段：默认 false = 开启） */
+  agent_disabled: boolean;
+  /** 允许买家自助申请销售资格（V1 建议 false） */
+  agent_self_apply: boolean;
 }
 
 export interface AllSettings {

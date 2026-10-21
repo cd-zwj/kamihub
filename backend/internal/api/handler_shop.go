@@ -373,7 +373,7 @@ func (h *Handlers) shopPurchase(c *gin.Context) {
 	needCaptcha := sec.OrderCaptchaMode == service.OrderCaptchaAlways
 	if h.risk != nil && sec.RiskOn() {
 		amount := 0.0
-		if row, total, qerr := h.listings.BuyerQuote(c.Request.Context(), req.ListingID, req.Quantity); qerr == nil && row != nil {
+		if row, total, qerr := h.listings.BuyerQuoteFor(c.Request.Context(), req.ListingID, req.Quantity, buyer.ID); qerr == nil && row != nil {
 			amount = total.InexactFloat64()
 		}
 		decision, rerr := h.risk.Evaluate(c.Request.Context(), service.EvalInput{

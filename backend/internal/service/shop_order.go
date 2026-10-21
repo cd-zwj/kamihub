@@ -94,7 +94,9 @@ func (s *ShopOrderService) Purchase(ctx context.Context, in ShopPurchaseInput) (
 	}
 
 	// ---- 1. 报价：用 C 端售价算钱 ----
-	listing, total, err := s.listings.BuyerQuote(ctx, in.ListingID, in.Quantity)
+	// 传入 BuyerID 让报价走档位专价；普通买家（retail）分支直接返回原价，
+	// 与改造前完全一致。
+	listing, total, err := s.listings.BuyerQuoteFor(ctx, in.ListingID, in.Quantity, in.BuyerID)
 	if err != nil {
 		return nil, err
 	}

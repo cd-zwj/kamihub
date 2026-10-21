@@ -1,8 +1,8 @@
-import { useState } from 'react';
+﻿import { useState } from 'react';
 import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { Avatar, Dropdown, Form, Input, Layout, Menu, Modal, Tag, message } from 'antd';
 import {
-  ApiOutlined, AppstoreOutlined, BookOutlined, DashboardOutlined, FileSearchOutlined,
+  ApiOutlined, AppstoreOutlined, BookOutlined, CrownOutlined, DashboardOutlined, FileSearchOutlined,
   FileTextOutlined, ImportOutlined, KeyOutlined, LinkOutlined, LogoutOutlined, SafetyOutlined,
   SettingOutlined, ShoppingCartOutlined, TeamOutlined, ThunderboltOutlined, UserOutlined, WalletOutlined,
 } from '@ant-design/icons';
@@ -37,6 +37,7 @@ export default function AppLayout() {
       ? [
           { key: '/admin/shop-admin', icon: <WalletOutlined />, label: <Link to="/admin/shop-admin">C 端商城</Link> },
           { key: '/admin/payment-admin', icon: <ThunderboltOutlined />, label: <Link to="/admin/payment-admin">在线支付</Link> },
+          { key: '/admin/agent', icon: <CrownOutlined />, label: <Link to="/admin/agent">销售与专价</Link> },
           { key: '/admin/users', icon: <TeamOutlined />, label: <Link to="/admin/users">用户</Link> },
           { key: '/admin/tokens', icon: <KeyOutlined />, label: <Link to="/admin/tokens">访问令牌</Link> },
           { key: '/admin/admin-guide', icon: <BookOutlined />, label: <Link to="/admin/admin-guide">使用准则</Link> },

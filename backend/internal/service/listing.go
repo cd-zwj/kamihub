@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -30,10 +31,22 @@ var (
 type ListingService struct {
 	db    *gorm.DB
 	cards *CardService
+	// pricing 档位专价。为 nil 时所有买家都按零售价（等价于关闭阶梯专价）。
+	pricing *PricingService
 }
 
 func NewListingService(db *gorm.DB, cards *CardService) *ListingService {
 	return &ListingService{db: db, cards: cards}
+}
+
+// WithPricing 装配档位定价服务。
+//
+// 用 setter 而不是改构造函数签名：现有测试与调用方都按两参数构造，
+// 改签名会波及一片无关代码；而且「pricing 为 nil 时退回零售价」本身
+// 就是一个有意义的降级行为（阶梯专价总开关关掉时正是这个状态）。
+func (s *ListingService) WithPricing(p *PricingService) *ListingService {
+	s.pricing = p
+	return s
 }
 
 // ---------------------------------------------------------------- 对 C 端暴露
@@ -611,7 +624,22 @@ func (s *ListingService) Delete(ctx context.Context, id uint) error {
 //
 // 这是下单链路的价格唯一入口：订单金额必须由此函数算出，
 // 绝不能让前端传价格上来。
+//
+// 不带买家身份的调用等价于零售买家（buyerID=0）—— 保留这个入口是为了
+// 让「普通买家价格与改造前完全一致」在结构上成立：它走的就是
+// BuyerQuoteFor 的 retail 分支，而 retail 分支直接返回 listing.SalePrice。
 func (s *ListingService) BuyerQuote(ctx context.Context, listingID uint, quantity int) (*models.Listing, decimal.Decimal, error) {
+	return s.BuyerQuoteFor(ctx, listingID, quantity, 0)
+}
+
+// BuyerQuoteFor 按买家档位报价。buyerID=0 表示零售。
+//
+// 返回的 total 是「实际应付金额」：单价（可能已按档位打折）× 数量。
+// 若档位专价撑不住保底线，pricing 会自动逐级回落到更高价格，
+// 绝不会返回一个亏本价（详见 PricingService.Quote）。
+func (s *ListingService) BuyerQuoteFor(
+	ctx context.Context, listingID uint, quantity int, buyerID uint,
+) (*models.Listing, decimal.Decimal, error) {
 	var row models.Listing
 	if err := s.db.WithContext(ctx).Preload("Goods").
 		Where("id = ? AND is_listed = ? AND sale_price > 0", listingID, true).
@@ -643,9 +671,46 @@ func (s *ListingService) BuyerQuote(ctx context.Context, listingID uint, quantit
 		}
 	}
 
+	// ---- 档位专价 ----
+	//
+	// buyerID=0 或 pricing 未装配 → 直接走原价，与改造前完全一致。
+	unitPrice := row.SalePrice
+	if buyerID > 0 && s.pricing != nil {
+		tier := s.buyerTier(ctx, buyerID)
+		if tier != "" && tier != models.TierRetail {
+			q, qerr := s.pricing.Quote(ctx, &row, tier)
+			if qerr != nil {
+				// 档位算价失败不能让下单失败：退回原价（对买家只多不少），
+				// 并留日志等运营发现。价格算错是内部问题，不该由买家承担。
+				slog.Error("档位报价失败，退回零售价",
+					"buyer_id", buyerID, "listing_id", listingID, "error", qerr.Error())
+			} else if q.FellBack {
+				slog.Info("档位专价触发保底回落",
+					"buyer_id", buyerID, "listing_id", listingID,
+					"requested", q.RequestedTier, "effective", q.TierCode,
+					"reason", q.Reason)
+				unitPrice = q.UnitPrice
+			} else {
+				unitPrice = q.UnitPrice
+			}
+		}
+	}
+
 	// 金额 = 单价 × 数量，四舍五入到分
-	total := row.SalePrice.Mul(decimal.NewFromInt(int64(quantity))).Round(2)
+	total := unitPrice.Mul(decimal.NewFromInt(int64(quantity))).Round(2)
 	return &row, total, nil
+}
+
+// buyerTier 取买家当前档位。取不到就按 retail 处理（宁可少给折扣）。
+func (s *ListingService) buyerTier(ctx context.Context, buyerID uint) string {
+	var tier string
+	err := s.db.WithContext(ctx).Model(&models.Buyer{}).
+		Where("id = ?", buyerID).
+		Pluck("price_tier", &tier).Error
+	if err != nil || strings.TrimSpace(tier) == "" {
+		return models.TierRetail
+	}
+	return tier
 }
 
 // IncrSold 累加已售数量（下单成功后调用，失败不影响主流程）。

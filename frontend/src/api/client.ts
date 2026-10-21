@@ -1,10 +1,10 @@
 import axios, { AxiosError } from 'axios';
 import { message } from 'antd';
 import type {
-  AdapterMeta, AllSettings, AuditLog, BlacklistEntry, CallLog, CaptchaChallenge, CardListResult, CardStats,
-  DashboardStats, Delivery, DeliveryView, Envelope, Goods, LoginResult, Notification, NotifyStatus, Order,
-  OrderAttempt, PageResult, Platform, ReconcileDiff, RiskHit, RiskRule, StrategyMeta, Supply, TOTPSetupResult,
-  TOTPStatus, User, WorkerTask, WorkerTaskRun,
+  AdapterMeta, AdminAgentRow, AdminPriceTier, AdminTierPrice, AllSettings, AuditLog, BlacklistEntry,
+  CallLog, CaptchaChallenge, CardListResult, CardStats, DashboardStats, Delivery, DeliveryView, Envelope,
+  Goods, LoginResult, Notification, NotifyStatus, Order, OrderAttempt, PageResult, Platform, ReconcileDiff,
+  RiskHit, RiskRule, StrategyMeta, Supply, TOTPSetupResult, TOTPStatus, User, WorkerTask, WorkerTaskRun,
 } from './types';
 
 const TOKEN_KEY = 'kamihub_token';
@@ -129,6 +129,57 @@ export const api = {
     unwrap<BlacklistEntry>(http.post('/blacklist', body)),
   deleteBlacklist: (id: number) =>
     unwrap<{ message: string }>(http.delete(`/blacklist/${id}`)),
+
+  // ---------- 迭代 3：销售阶梯专价 ----------
+  agentApplications: (params?: { page?: number; page_size?: number }) =>
+    unwrap<PageResult<User>>(http.get('/agent/applications', { params })),
+  reviewAgent: (id: number, body: { approve: boolean; remark?: string; tier_code?: string }) =>
+    unwrap<{ message: string }>(http.post(`/agent/applications/${id}/review`, body)),
+  agentBuyers: (params?: { page?: number; page_size?: number; keyword?: string; tier?: string }) =>
+    unwrap<PageResult<AdminAgentRow>>(http.get('/agent/buyers', { params })),
+  updateAgent: (id: number, body: { tier_code?: string; agent_status?: number; remark?: string }) =>
+    unwrap<{ message: string }>(http.put(`/agent/buyers/${id}`, body)),
+  agentTiers: () => unwrap<{ list: AdminPriceTier[]; fee_rate: string }>(http.get('/agent/tiers')),
+  updateAgentTier: (
+    id: number,
+    body: Partial<{
+      name: string;
+      min_monthly_orders: number;
+      min_monthly_amount: number;
+      discount_rate: number;
+      min_margin_rate: number;
+      min_retail_price: number;
+      sort_order: number;
+      enabled: boolean;
+      remark: string;
+    }>,
+  ) => unwrap<AdminPriceTier>(http.put(`/agent/tiers/${id}`, body)),
+  recalcAgentTiers: () =>
+    unwrap<{
+      scanned: number;
+      upgraded: number;
+      downgraded: number;
+      in_grace: number;
+      held: number;
+      failed: number;
+    }>(http.post('/agent/recalc')),
+  agentStats: () =>
+    unwrap<{
+      agents: number;
+      frozen: number;
+      tier_dist: { price_tier: string; n: number }[];
+      gmv_30d: string;
+      orders_30d: number;
+      enabled: boolean;
+      self_apply: boolean;
+    }>(http.get('/agent/stats')),
+  tierPrices: (params?: { listing_id?: number }) =>
+    unwrap<{ list: AdminTierPrice[] }>(http.get('/agent/tier-prices', { params })),
+  upsertTierPrice: (body: { listing_id: number; tier_code: string; price: number }) =>
+    unwrap<AdminTierPrice>(http.post('/agent/tier-prices', body)),
+  deleteTierPrice: (id: number) =>
+    unwrap<{ message: string }>(http.delete(`/agent/tier-prices/${id}`)),
+
   me: () => unwrap<User>(http.get('/auth/me')),
   logout: () => unwrap<{ message: string }>(http.post('/auth/logout')),
   changePassword: (old_password: string, new_password: string) =>

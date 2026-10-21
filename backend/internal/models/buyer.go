@@ -37,6 +37,27 @@ type Buyer struct {
 	LastLoginAt *time.Time `json:"last_login_at"`
 	LastLoginIP string     `gorm:"size:64" json:"last_login_ip"`
 
+	// ---------- 迭代 3：销售阶梯专价 ----------
+
+	// PriceTier 当前专价档位（缓存值，由每日重算任务维护）。
+	//
+	// 为什么不实时算：档位依赖「近 30 天销量」聚合，每下一单都算一次
+	// 会把下单链路拖慢；而且档位本来就是日更语义，实时算没有意义。
+	// 默认 retail —— 任何没被设为销售的人都是零售价，这与改造前完全一致。
+	PriceTier string `gorm:"size:32;not null;default:retail;index" json:"price_tier"`
+	// TierCalcAt 档位最近计算时间
+	TierCalcAt *time.Time `json:"tier_calc_at"`
+	// TierGraceUntil 降级宽限截止时间。
+	// 跌破条件后保留原档位到此刻（设计 D5：7 天宽限，避免销售「不敢休息」）。
+	TierGraceUntil *time.Time `json:"tier_grace_until"`
+
+	// AgentStatus 销售资格：0 未开通 / 1 正常 / 2 冻结
+	AgentStatus int `gorm:"not null;default:0;index" json:"agent_status"`
+	// AgentBoundAt 销售资格开通时间
+	AgentBoundAt *time.Time `json:"agent_bound_at"`
+	// AgentRemark 销售备注（申请理由、违规记录等）
+	AgentRemark string `gorm:"size:255" json:"agent_remark"`
+
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }

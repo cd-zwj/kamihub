@@ -1,8 +1,9 @@
-import { Navigate, Route, Routes, useLocation } from 'react-router-dom';
+﻿import { Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { Spin } from 'antd';
 import { ShopAuthProvider, useShopAuth } from '@/shop/auth/ShopAuthContext';
 import ShopLayout from '@/shop/layout/ShopLayout';
 import ShopHome from '@/shop/pages/ShopHome';
+import AgentCenter from '@/shop/pages/AgentCenter';
 import ShopListingDetail from '@/shop/pages/ShopListingDetail';
 import ShopAuth from '@/shop/pages/ShopAuth';
 import ShopWallet from '@/shop/pages/ShopWallet';
@@ -54,6 +55,7 @@ function ShopRoutes() {
       <Route element={<ShopLayout />}>
         <Route path="/" element={<ShopHome />} />
         <Route path="/listings/:id" element={<ShopListingDetail />} />
+          <Route path="/agent" element={<AgentCenter />} />
         <Route
           path="/wallet"
           element={

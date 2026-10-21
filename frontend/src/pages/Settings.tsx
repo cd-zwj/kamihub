@@ -615,6 +615,38 @@ export default function Settings() {
                     </Form.Item>
                   </Space>
 
+                  {/* ---------------- 迭代 3：销售阶梯专价 ---------------- */}
+                  <Divider orientation="left" plain style={{ marginTop: 8 }}>
+                    销售阶梯专价
+                  </Divider>
+                  <Alert
+                    type="info"
+                    showIcon
+                    style={{ marginBottom: 16 }}
+                    message="关闭后所有买家立刻回到零售价"
+                    description="这是出问题时的总开关：关掉后不再重算档位，下单也不再套用任何专价。已有的档位数据保留，重新打开即恢复。"
+                  />
+                  <Space size={24} wrap>
+                    <Form.Item
+                      name="agent_disabled"
+                      label="关闭阶梯专价"
+                      valuePropName="checked"
+                      extra="开启后所有人按零售价下单（应急用）"
+                      style={{ marginBottom: 12 }}
+                    >
+                      <Switch />
+                    </Form.Item>
+                    <Form.Item
+                      name="agent_self_apply"
+                      label="允许自助申请销售资格"
+                      valuePropName="checked"
+                      extra="V1 建议关闭：早期只放信任的人，由后台人工开通"
+                      style={{ marginBottom: 12 }}
+                    >
+                      <Switch />
+                    </Form.Item>
+                  </Space>
+
                   <Button type="primary" htmlType="submit" icon={<SaveOutlined />} loading={saving}>
                     保存安全设置
                   </Button>

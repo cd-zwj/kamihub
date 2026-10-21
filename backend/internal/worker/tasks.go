@@ -1,4 +1,4 @@
-package worker
+﻿package worker
 
 import (
 	"context"
@@ -25,6 +25,8 @@ type Services struct {
 	Orders    *service.OrderService
 	Payment   *service.PaymentService
 	Reconcile *service.ReconcileService
+	// Agent 销售档位重算（迭代 3）。为 nil 表示未启用阶梯专价。
+	Agent *service.AgentService
 }
 
 // BuildTasks 构造全部定时任务。
@@ -41,8 +43,7 @@ func BuildTasks(db *gorm.DB, cfg *config.Config, svc Services, n *notify.Notifie
 			Timeout:  timeout,
 			LockKey:  lockKeyStockSync,
 			Run:      stockSyncTask(db, cfg, svc, n),
-		},
-		{
+		}, {
 			Name:     TaskBalanceSync,
 			Interval: cfg.Worker.BalanceInterval,
 			Timeout:  timeout,
@@ -70,6 +71,40 @@ func BuildTasks(db *gorm.DB, cfg *config.Config, svc Services, n *notify.Notifie
 			LockKey:  lockKeyReconcile,
 			Run:      reconcileTask(svc, n),
 		},
+		{
+			// 档位重算：每天一次即可（档位是日更语义，实时算没有意义）。
+			// 设计文档 §5.1：计算频率「每日 03:00」，这里用 24h 间隔。
+			Name:     TaskTierRecalc,
+			Interval: cfg.Worker.TierRecalcInterval,
+			Timeout:  timeout,
+			LockKey:  lockKeyTierRecalc,
+			Run:      tierRecalcTask(svc, n),
+		},
+	}
+}
+
+// ---------------------------------------------------------------- 任务 6：档位重算
+
+// tierRecalcTask 重算所有销售的专价档位。
+//
+// 幂等：结果只取决于「近 30 天 delivered 订单」这一个输入，
+// 同一天跑多次结果一致。
+func tierRecalcTask(svc Services, n *notify.Notifier) func(context.Context) (Result, error) {
+	return func(ctx context.Context) (Result, error) {
+		if svc.Agent == nil {
+			return Result{Detail: "阶梯专价未装配，跳过"}, nil
+		}
+		started := time.Now()
+		res, err := svc.Agent.RecalcTiers(ctx)
+		if err != nil {
+			return Result{}, err
+		}
+		return Result{
+			Affected: int64(res.Upgraded + res.Downgraded),
+			Detail: fmt.Sprintf("扫描 %d 个销售：升级 %d，降级 %d，宽限 %d，防刷拦截 %d，失败 %d（%s）",
+				res.Scanned, res.Upgraded, res.Downgraded, res.InGrace, res.Held, res.Failed,
+				time.Since(started).Round(time.Millisecond)),
+		}, nil
 	}
 }
 
@@ -139,7 +174,7 @@ func stockSyncTask(db *gorm.DB, cfg *config.Config, svc Services, n *notify.Noti
 				Title:   "所有货源库存同步失败",
 				Content: fmt.Sprintf("本轮 %d 条货源全部同步失败，上游可能整体不可用", failCount),
 				Fields: map[string]any{
-					"失败数": failCount,
+					"失败数":  failCount,
 					"货源总数": len(supplies),
 				},
 			})
@@ -162,7 +197,7 @@ func alertSupplyOutOfStock(ctx context.Context, n *notify.Notifier, sup *models.
 		Content: fmt.Sprintf("%s 上的商品 %s 库存已归零",
 			platName, sup.PlatformGoodsNo),
 		Fields: map[string]any{
-			"货源ID":  sup.ID,
+			"货源ID": sup.ID,
 			"平台":   platName,
 			"上游商品": sup.PlatformGoodsNo,
 			"原库存":  prevStock,
@@ -327,7 +362,7 @@ func staleOrderTask(db *gorm.DB, cfg *config.Config, svc Services, n *notify.Not
 				Content: fmt.Sprintf("%d 笔订单超过 %d 分钟仍处于采购中，需人工关注",
 					stillStale, staleMinutes),
 				Fields: map[string]any{
-					"卡单数":   stillStale,
+					"卡单数":  stillStale,
 					"阈值分钟": staleMinutes,
 				},
 				Link: "/admin/orders?status=purchasing",

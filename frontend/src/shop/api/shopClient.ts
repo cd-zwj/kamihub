@@ -272,6 +272,18 @@ export const shopApi = {
     unwrap<PageResult<ShopOrderView>>(http.get('/orders', { params: q })),
   order: (id: number) => unwrap<ShopOrderView>(http.get(`/orders/${id}`)),
 
+  // ---------- 迭代 3：销售阶梯专价 ----------
+  /** 我的档位与销量概览（普通买家也能调，返回 agent_status=0） */
+  agentMe: () => unwrap<AgentOverview>(http.get('/agent/me')),
+  /** 全部档位说明（公开，不需要登录） */
+  agentTiers: () => unwrap<{ list: PriceTier[]; enabled: boolean; fee_rate: string }>(http.get('/agent/tiers')),
+  /** 申请成为销售 */
+  agentApply: (reason: string) => unwrap<{ message: string }>(http.post('/agent/apply', { reason })),
+  /** 我的专价目表 */
+  agentPriceList: () => unwrap<{ list: AgentPriceRow[] }>(http.get('/agent/price-list')),
+  /** 我的销量统计 */
+  agentStats: () => unwrap<{ stats_30d: TierStats; trend: AgentTrendPoint[] }>(http.get('/agent/stats')),
+
   // ---------- 在线支付（易支付）----------
   /** 支付可用性：决定钱包页是否展示「在线充值」 */
   paymentInfo: () => unwrap<ShopPaymentInfo>(http.get('/payment/info')),
@@ -287,3 +299,64 @@ export const shopApi = {
 };
 
 export default http;
+
+// ---------------------------------------------------------------- 迭代 3：销售阶梯专价
+
+/** 档位定义 */
+export interface PriceTier {
+  id: number;
+  code: string;
+  name: string;
+  min_monthly_orders: number;
+  min_monthly_amount: string;
+  discount_rate: string;
+  min_margin_rate: string;
+  min_retail_price: string;
+  sort_order: number;
+  enabled: boolean;
+  remark: string;
+}
+
+/** 近 30 天销量统计 */
+export interface TierStats {
+  orders: number;
+  amount: string;
+  refunded: number;
+  refund_rate: number;
+  max_day_orders: number;
+  suspicious: boolean;
+  reason: string;
+}
+
+/** 销售中心概览 */
+export interface AgentOverview {
+  agent_status: number;
+  enabled: boolean;
+  self_apply: boolean;
+  current_tier?: PriceTier | null;
+  next_tier?: PriceTier | null;
+  stats_30d: TierStats;
+  to_next_orders: number;
+  to_next_amount: string;
+  grace_until?: string | null;
+  remark: string;
+}
+
+/** 专价目表一行 */
+export interface AgentPriceRow {
+  listing_id: number;
+  title: string;
+  category: string;
+  retail_price: string;
+  tier_price: string;
+  profit: string;
+  fell_back: boolean;
+  tier_code: string;
+}
+
+/** 销量趋势点 */
+export interface AgentTrendPoint {
+  day: string;
+  orders: number;
+  amount: string;
+}

@@ -25,6 +25,21 @@ type Config struct {
 	Upload   Upload
 	Worker   Worker
 	Notify   Notify
+	Pricing  Pricing
+}
+
+// Pricing 定价相关配置。
+type Pricing struct {
+	// FeeRate 支付通道手续费率（0.0025 = 0.25%）。
+	//
+	// 为什么必须配进来：阶梯专价的「保底公式」要用它算净利。
+	// 算错这个数字会让档位要么过宽（亏本）要么过窄（销售没动力）：
+	//
+	//	净利 = 专价 − 成本 − 专价 × FeeRate
+	//
+	// ⚠️ 这个值必须与真实费率一致。上线前务必做一笔真实小额交易，
+	// 核对「到账金额 = 订单金额 × (1 − FeeRate)」并确认没有隐藏扣费。
+	FeeRate float64
 }
 
 // 运行模式
@@ -50,6 +65,8 @@ type Worker struct {
 	PaymentInterval   time.Duration
 	OrderInterval     time.Duration
 	ReconcileInterval time.Duration
+	// TierRecalcInterval 销售档位重算间隔。档位是日更语义，默认 24 小时。
+	TierRecalcInterval time.Duration
 	// TaskTimeout 单次执行超时
 	TaskTimeout time.Duration
 	// BalanceLow 平台余额预警阈值（元）。低于该值触发告警。
@@ -95,7 +112,7 @@ type Upload struct {
 }
 
 type App struct {
-	Env         string // development / production
+	Env string // development / production
 	// Mode 运行模式：all / api / worker
 	Mode        string
 	Port        int
@@ -247,15 +264,16 @@ func Load() (*Config, error) {
 			URLPrefix: "/uploads",
 		},
 		Worker: Worker{
-			Enabled:           envBool("WORKER_ENABLED", true),
-			StockInterval:     envDuration("WORKER_STOCK_INTERVAL", 2*time.Minute),
-			BalanceInterval:   envDuration("WORKER_BALANCE_INTERVAL", 5*time.Minute),
-			PaymentInterval:   envDuration("WORKER_PAYMENT_INTERVAL", 1*time.Minute),
-			OrderInterval:     envDuration("WORKER_ORDER_INTERVAL", 2*time.Minute),
-			ReconcileInterval: envDuration("WORKER_RECONCILE_INTERVAL", time.Hour),
-			TaskTimeout:       envDuration("WORKER_TASK_TIMEOUT", 5*time.Minute),
-			BalanceLow:        envFloat("WORKER_BALANCE_LOW", 100),
-			StaleMinutes:      envInt("WORKER_STALE_MINUTES", 10),
+			Enabled:            envBool("WORKER_ENABLED", true),
+			StockInterval:      envDuration("WORKER_STOCK_INTERVAL", 2*time.Minute),
+			BalanceInterval:    envDuration("WORKER_BALANCE_INTERVAL", 5*time.Minute),
+			PaymentInterval:    envDuration("WORKER_PAYMENT_INTERVAL", 1*time.Minute),
+			OrderInterval:      envDuration("WORKER_ORDER_INTERVAL", 2*time.Minute),
+			ReconcileInterval:  envDuration("WORKER_RECONCILE_INTERVAL", time.Hour),
+			TierRecalcInterval: envDuration("WORKER_TIER_RECALC_INTERVAL", 24*time.Hour),
+			TaskTimeout:        envDuration("WORKER_TASK_TIMEOUT", 5*time.Minute),
+			BalanceLow:         envFloat("WORKER_BALANCE_LOW", 100),
+			StaleMinutes:       envInt("WORKER_STALE_MINUTES", 10),
 		},
 		Notify: Notify{
 			Enabled:          envBool("NOTIFY_ENABLED", true),
@@ -267,6 +285,12 @@ func Load() (*Config, error) {
 			AggregateWindow:  envDuration("NOTIFY_AGGREGATE_WINDOW", 5*time.Minute),
 			QuietStart:       envInt("NOTIFY_QUIET_START", 2),
 			QuietEnd:         envInt("NOTIFY_QUIET_END", 7),
+		},
+
+		Pricing: Pricing{
+			// 默认 0.25%（与用户确认的费率一致）。
+			// 这个默认值只是「没配时别崩」，生产必须以实测为准。
+			FeeRate: envFloat("PAY_FEE_RATE", 0.0025),
 		},
 	}
 

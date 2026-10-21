@@ -105,7 +105,20 @@ type SecuritySettings struct {
 	// CaptchaProvider 验证码实现：空串或 arithmetic = 内置算术题。
 	// 预留 geetest / turnstile 等第三方接入位，见 CaptchaService 的说明。
 	CaptchaProvider string `json:"captcha_provider"`
+
+	// ---------- 迭代 3：销售阶梯专价 ----------
+	//
+	// AgentDisabled 阶梯专价总开关（反向字段，与上面几个开关同一套理由）：
+	// 缺配置时零值 false = 保持开启，不会因为一次升级把全站价格体系静默关掉。
+	// 关掉后：不再重算档位，且 BuyerQuote 对所有人按零售价。
+	AgentDisabled bool `json:"agent_disabled"`
+	// AgentSelfApply 是否允许买家自助提交销售申请。
+	// V1 建议 false：早期只放信任的人（设计 §11 第 6 条）。
+	AgentSelfApply bool `json:"agent_self_apply"`
 }
+
+// AgentEnabled 阶梯专价是否启用
+func (s SecuritySettings) AgentEnabled() bool { return !s.AgentDisabled }
 
 // 下单验证码策略
 const (

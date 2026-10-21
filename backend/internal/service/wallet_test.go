@@ -56,6 +56,8 @@ func testDB(t *testing.T) *gorm.DB {
 		&models.OrderAttempt{}, &models.Platform{}, &models.Supply{},
 		// 迭代 2 安全加固：2FA 恢复码、风控规则/命中、黑名单
 		&models.User{}, &models.UserRecoveryCode{}, &models.RiskRule{}, &models.RiskHit{}, &models.Blacklist{},
+		// 迭代 3 阶梯专价：档位表与商品级专价覆盖
+		&models.PriceTier{}, &models.ListingTierPrice{},
 		// 支付相关：settings 存支付配置，payment_orders 存支付单
 		&models.Setting{}, &models.PaymentOrder{},
 	); err != nil {

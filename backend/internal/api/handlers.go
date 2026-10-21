@@ -76,6 +76,10 @@ type Handlers struct {
 	totp    *service.TOTPService
 	captcha *service.CaptchaService
 	risk    *service.RiskService
+
+	// ---------- 迭代 3：销售阶梯专价 ----------
+	pricing *service.PricingService
+	agent   *service.AgentService
 }
 
 // Deps 构造依赖
@@ -110,6 +114,10 @@ type Deps struct {
 	TOTP    *service.TOTPService
 	Captcha *service.CaptchaService
 	Risk    *service.RiskService
+
+	// ---------- 迭代 3：销售阶梯专价 ----------
+	Pricing *service.PricingService
+	Agent   *service.AgentService
 }
 
 func NewHandlers(d Deps) *Handlers {
@@ -126,6 +134,8 @@ func NewHandlers(d Deps) *Handlers {
 		reconcile: d.Reconcile, notifier: d.Notify, worker: d.WorkerRunner,
 
 		totp: d.TOTP, captcha: d.Captcha, risk: d.Risk,
+
+		pricing: d.Pricing, agent: d.Agent,
 	}
 }
 
@@ -180,6 +190,8 @@ func (h *Handlers) Register(r *gin.Engine) {
 	shop.GET("/listings/:id", h.shopGetListing)
 	shop.POST("/auth/register", h.shopRegister)
 	shop.POST("/auth/login", h.shopLogin)
+	// 档位说明表是公开的：它是「拉人做销售」的展示物料，不该要求登录才能看
+	shop.GET("/agent/tiers", h.shopAgentTiers)
 
 	// 在线支付（易支付）
 	//
@@ -211,6 +223,14 @@ func (h *Handlers) Register(r *gin.Engine) {
 		shopAuthed.POST("/orders", h.shopPurchase)
 		shopAuthed.GET("/orders", h.shopListOrders)
 		shopAuthed.GET("/orders/:id", h.shopGetOrder)
+
+		// ---------- 迭代 3：销售阶梯专价 ----------
+		// 普通买家也能调 /agent/me（返回 agent_status=0），
+		// 前端用同一个接口渲染「申请入口 / 销售中心」两种状态。
+		shopAuthed.GET("/agent/me", h.shopAgentMe)
+		shopAuthed.POST("/agent/apply", h.shopAgentApply)
+		shopAuthed.GET("/agent/price-list", h.shopAgentPriceList)
+		shopAuthed.GET("/agent/stats", h.shopAgentStats)
 	}
 
 	// ---------- 需登录 ----------
@@ -373,6 +393,24 @@ func (h *Handlers) Register(r *gin.Engine) {
 		admin.GET("/blacklist", h.listBlacklist)
 		admin.POST("/blacklist", h.createBlacklist)
 		admin.DELETE("/blacklist/:id", h.deleteBlacklist)
+
+		// ---------- 迭代 3：销售阶梯专价 ----------
+		// 申请审核
+		admin.GET("/agent/applications", h.adminListAgentApplications)
+		admin.POST("/agent/applications/:id/review", h.adminReviewAgent)
+		// 销售管理
+		admin.GET("/agent/buyers", h.adminListAgents)
+		admin.PUT("/agent/buyers/:id", h.adminUpdateAgent)
+		// 档位配置
+		admin.GET("/agent/tiers", h.adminListTiers)
+		admin.PUT("/agent/tiers/:id", h.adminUpdateTier)
+		admin.POST("/agent/recalc", h.adminRecalcTiers)
+		// 销售看板
+		admin.GET("/agent/stats", h.adminAgentStats)
+		// 商品级专价覆盖
+		admin.GET("/agent/tier-prices", h.adminListTierPrices)
+		admin.POST("/agent/tier-prices", h.adminUpsertTierPrice)
+		admin.DELETE("/agent/tier-prices/:id", h.adminDeleteTierPrice)
 	}
 
 	r.NoRoute(func(c *gin.Context) {
