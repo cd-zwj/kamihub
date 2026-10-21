@@ -16,6 +16,7 @@ import { fmtTime, money, yuan } from '@/utils/format';
 import { useAuth } from '@/auth/AuthContext';
 import CardPoolDrawer from '@/components/CardPoolDrawer';
 import ImageUploader from '@/components/ImageUploader';
+import GoodsWizard from '@/components/GoodsWizard';
 
 /** 供货方式：向上游平台采购（默认） / 用商品自带的卡密池发货 / 两者混合 */
 const STOCK_MODE_UPSTREAM = 1;
@@ -34,6 +35,8 @@ export default function GoodsPage() {
   const [platforms, setPlatforms] = useState<Platform[]>([]);
 
   const [open, setOpen] = useState(false);
+  // 新建走三步向导（迭代 4 · U4），编辑仍用下面的 Modal
+  const [wizardOpen, setWizardOpen] = useState(false);
   const [editing, setEditing] = useState<Goods | null>(null);
   const [saving, setSaving] = useState(false);
   const [form] = Form.useForm();
@@ -99,26 +102,10 @@ export default function GoodsPage() {
     api.platforms({ page: 1, page_size: 200 }).then((r) => setPlatforms(r.list)).catch(toastError);
   }, []);
 
+  // 新建走三步向导（迭代 4 · U4）；编辑仍用下面的 Modal。
+  // 分步只对「从零配一个商品」有意义 —— 编辑时用户目标明确，分步反而多点击。
   function openCreate() {
-    setEditing(null);
-    form.resetFields();
-    form.setFieldsValue({
-      status: 1,
-      delivery_mode: 1,
-      stock_mode: STOCK_MODE_UPSTREAM,
-      routing_strategy: 'priority',
-      failover_enabled: true,
-      max_attempts: 3,
-      max_quantity: 1,
-      price: 0,
-      max_supply_price: 0,
-      cost_price: 0,
-      // 撤销订单时卡密的默认去向：默认不退回，保守取值。
-      return_card_on_cancel: false,
-      // 混合模式默认池子优先：池子里的货是已付过钱的沉没成本，先清掉
-      local_stock_first: true,
-    });
-    setOpen(true);
+    setWizardOpen(true);
   }
 
   function openEdit(row: Goods) {
@@ -613,9 +600,29 @@ export default function GoodsPage() {
         />
       </Card>
 
-      {/* ---------------- 商品新增/编辑 ---------------- */}
+      {/* ---------------- 商品新建向导（迭代 4 · U4） ----------------
+          新建统一走向导，编辑才走下面的 Modal。
+          理由见 GoodsWizard.tsx 顶部注释：从零配商品需要引导，
+          改某一项则不需要。 */}
+      <GoodsWizard
+        open={wizardOpen}
+        strategies={strategies}
+        onClose={() => setWizardOpen(false)}
+        onCreated={(g) => {
+          setWizardOpen(false);
+          void load();
+          // 建完立刻带他去挂货源 —— 上游商品没货源等于下不了单
+          if ((g.stock_mode ?? STOCK_MODE_UPSTREAM) === STOCK_MODE_UPSTREAM) {
+            void openSupplies(g);
+          } else if ((g.stock_mode ?? STOCK_MODE_UPSTREAM) === STOCK_MODE_LOCAL) {
+            setCardGoods(g);
+          }
+        }}
+      />
+
+      {/* ---------------- 商品编辑 ---------------- */}
       <Modal
-        title={editing ? `编辑商品 · ${editing.name}` : '新增商品'}
+        title={editing ? `编辑商品 · ${editing.name}` : '商品'}
         open={open}
         onCancel={() => setOpen(false)}
         onOk={submit}
@@ -737,6 +744,47 @@ export default function GoodsPage() {
               </Form.Item>
             )}
           </Space>
+
+          {/* ---------------- 成本红线提示（迭代 4 · U4） ----------------
+              这里是防止亏本采购最关键的一处提示。
+              `max_supply_price` 是「单笔应付总额上限」，不填 = 不限制成本；
+              上游随时可能涨价，没有红线就会按涨价后的价照买，直接吃光利润。
+
+              编辑时才有意义：新建时还没挂货源，算不出成本。 */}
+          {usesUpstream && (() => {
+            const costs = (editing?.supplies ?? [])
+              .filter((s) => s.enabled && Number(s.cost_price) > 0)
+              .map((s) => Number(s.cost_price));
+            if (costs.length === 0) return null;
+            const minCost = Math.min(...costs);
+            const current = Number(Form.useWatch('max_supply_price', form) ?? 0);
+            // 建议值：最低成本上浮 10%，给涨价留一点缓冲又不至于没约束
+            const suggested = Math.ceil(minCost * 1.1 * 100) / 100;
+
+            if (current <= 0) {
+              return (
+                <Alert
+                  type="warning"
+                  showIcon
+                  style={{ marginBottom: 12 }}
+                  message={`未设置成本红线：当前最低货源成本 ¥${minCost.toFixed(2)}`}
+                  description={`不设置就会按上游报价照买，涨价时直接亏本。建议填 ¥${suggested.toFixed(2)}（最低成本上浮 10%）。`}
+                />
+              );
+            }
+            if (current < minCost) {
+              return (
+                <Alert
+                  type="error"
+                  showIcon
+                  style={{ marginBottom: 12 }}
+                  message={`成本红线 ¥${current.toFixed(2)} 低于最低货源成本 ¥${minCost.toFixed(2)}`}
+                  description="这个值会导致所有货源都因「超过最高供应价」被跳过，商品实际买不到货。请调到不低于成本。"
+                />
+              );
+            }
+            return null;
+          })()}
 
           {usesCardPool && (
             <>
