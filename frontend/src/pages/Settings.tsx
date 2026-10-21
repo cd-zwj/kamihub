@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+﻿import { useCallback, useEffect, useState } from 'react';
 import {
   Alert, Button, Card, Divider, Form, Input, InputNumber, Select, Space, Switch, Table, Tabs, Typography, message,
 } from 'antd';
@@ -659,7 +659,7 @@ export default function Settings() {
               key: 'preview',
               label: '配置总览',
               children: (
-                <Table
+                <Table scroll={{ x: 'max-content' }}
                   size="small"
                   rowKey="key"
                   pagination={false}

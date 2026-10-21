@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+﻿import { useCallback, useEffect, useState } from 'react';
 import {
   Alert,
   Button,
@@ -484,7 +484,7 @@ function PaymentOrdersPanel() {
         description="系统会主动向易支付查询这笔交易，若上游确认已收款，会自动补入买家余额。"
       />
 
-      <Table
+      <Table scroll={{ x: 'max-content' }}
         rowKey="id"
         columns={columns}
         dataSource={rows}

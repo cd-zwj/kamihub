@@ -1,65 +1,122 @@
 ﻿import { useState } from 'react';
 import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom';
-import { Avatar, Dropdown, Form, Input, Layout, Menu, Modal, Tag, message } from 'antd';
+import { Avatar, Button, Dropdown, Form, Input, Layout, Menu, Modal, Space, Tag, Tooltip, message } from 'antd';
+import type { MenuProps } from 'antd';
 import {
   ApiOutlined, AppstoreOutlined, BookOutlined, CrownOutlined, DashboardOutlined, FileSearchOutlined,
   FileTextOutlined, ImportOutlined, KeyOutlined, LinkOutlined, LogoutOutlined, SafetyOutlined,
-  SettingOutlined, ShoppingCartOutlined, TeamOutlined, ThunderboltOutlined, UserOutlined, WalletOutlined,
+  MoonOutlined, SettingOutlined, ShoppingCartOutlined, SunOutlined, TeamOutlined, ThunderboltOutlined, UserOutlined, WalletOutlined,
 } from '@ant-design/icons';
 import { api } from '@/api/client';
 import { useAuth } from '@/auth/AuthContext';
 import ErrorBoundary from '@/components/ErrorBoundary';
+import { useThemeMode } from '@/theme/ThemeProvider';
 
 const { Header, Sider, Content } = Layout;
 
 export default function AppLayout() {
   const { user, isAdmin, logout } = useAuth();
+  const { dark, toggle: toggleTheme } = useThemeMode();
   const navigate = useNavigate();
   const location = useLocation();
   const [pwdOpen, setPwdOpen] = useState(false);
   const [pwdForm] = Form.useForm();
   const [pwdLoading, setPwdLoading] = useState(false);
 
-  // 后台所有路径都带 /admin 前缀：根路径留给买家商城。
-  // 例外是「接口文档」—— 它是独立布局的公开页，路径就是 /docs。
-  const items = [
+  // 后台菜单：4 个分组 + 概览独立一项。
+  //
+  // 为什么分组：原来 12 项平铺，`上游商品`/`商品与货源`/`平台管理` 明明是一组
+  // 却被 `提货链接` 隔开；`C端商城`/`在线支付` 属于运营却夹在系统项之间。
+  // 分组后运营能按「我在做什么」找功能，而不是靠记忆位置。
+  //
+  // antd 的 type:'group' 只是视觉分组，不影响路由 —— 所以这一项改动风险极低。
+  const items: MenuProps['items'] = [
     { key: '/admin', icon: <DashboardOutlined />, label: <Link to="/admin">概览</Link> },
-    { key: '/admin/orders', icon: <ShoppingCartOutlined />, label: <Link to="/admin/orders">订单</Link> },
-    { key: '/admin/deliveries', icon: <LinkOutlined />, label: <Link to="/admin/deliveries">提货链接</Link> },
-    { key: '/admin/upstream', icon: <ImportOutlined />, label: <Link to="/admin/upstream">上游商品</Link> },
-    { key: '/admin/goods', icon: <AppstoreOutlined />, label: <Link to="/admin/goods">商品与货源</Link> },
-    { key: '/admin/platforms', icon: <ApiOutlined />, label: <Link to="/admin/platforms">平台管理</Link> },
-    { key: '/admin/logs', icon: <FileSearchOutlined />, label: <Link to="/admin/logs">日志</Link> },
-    // 账号安全对所有员工开放（operator 也该能给自己绑 2FA）；
-    // 里面的风控/黑名单面板只有管理员能改，非管理员点了会 403。
-    { key: '/admin/security', icon: <SafetyOutlined />, label: <Link to="/admin/security">安全与风控</Link> },
-    ...(isAdmin
-      ? [
-          { key: '/admin/shop-admin', icon: <WalletOutlined />, label: <Link to="/admin/shop-admin">C 端商城</Link> },
-          { key: '/admin/payment-admin', icon: <ThunderboltOutlined />, label: <Link to="/admin/payment-admin">在线支付</Link> },
-          { key: '/admin/agent', icon: <CrownOutlined />, label: <Link to="/admin/agent">销售与专价</Link> },
-          { key: '/admin/users', icon: <TeamOutlined />, label: <Link to="/admin/users">用户</Link> },
-          { key: '/admin/tokens', icon: <KeyOutlined />, label: <Link to="/admin/tokens">访问令牌</Link> },
-          { key: '/admin/admin-guide', icon: <BookOutlined />, label: <Link to="/admin/admin-guide">使用准则</Link> },
-          {
-            key: '/docs',
-            icon: <FileTextOutlined />,
-            // 开放接口文档是独立布局（没有后台侧边栏），新窗口打开更合适
-            label: (
-              <a href="/docs" target="_blank" rel="noreferrer">
-                接口文档
-              </a>
-            ),
-          },
-          { key: '/admin/settings', icon: <SettingOutlined />, label: <Link to="/admin/settings">系统设置</Link> },
-        ]
-      : []),
+    {
+      type: 'group',
+      label: '交易',
+      children: [
+        { key: '/admin/orders', icon: <ShoppingCartOutlined />, label: <Link to="/admin/orders">订单</Link> },
+        { key: '/admin/deliveries', icon: <LinkOutlined />, label: <Link to="/admin/deliveries">提货链接</Link> },
+        ...(isAdmin
+          ? [
+              {
+                key: '/admin/payment-admin',
+                icon: <ThunderboltOutlined />,
+                label: <Link to="/admin/payment-admin">在线支付</Link>,
+              },
+            ]
+          : []),
+      ],
+    },
+    {
+      type: 'group',
+      label: '货源',
+      children: [
+        { key: '/admin/upstream', icon: <ImportOutlined />, label: <Link to="/admin/upstream">上游商品</Link> },
+        { key: '/admin/goods', icon: <AppstoreOutlined />, label: <Link to="/admin/goods">商品与货源</Link> },
+        { key: '/admin/platforms', icon: <ApiOutlined />, label: <Link to="/admin/platforms">平台管理</Link> },
+      ],
+    },
+    {
+      type: 'group',
+      label: '运营',
+      children: isAdmin
+        ? [
+            { key: '/admin/shop-admin', icon: <WalletOutlined />, label: <Link to="/admin/shop-admin">C 端商城</Link> },
+            { key: '/admin/agent', icon: <CrownOutlined />, label: <Link to="/admin/agent">销售与专价</Link> },
+            { key: '/admin/users', icon: <TeamOutlined />, label: <Link to="/admin/users">用户</Link> },
+          ]
+        : [],
+    },
+    {
+      type: 'group',
+      label: '系统',
+      children: [
+        { key: '/admin/logs', icon: <FileSearchOutlined />, label: <Link to="/admin/logs">日志</Link> },
+        // 账号安全对所有员工开放（operator 也该能给自己绑 2FA）；
+        // 里面的风控/黑名单面板只有管理员能改，非管理员点了会 403。
+        { key: '/admin/security', icon: <SafetyOutlined />, label: <Link to="/admin/security">安全与风控</Link> },
+        ...(isAdmin
+          ? [
+              { key: '/admin/tokens', icon: <KeyOutlined />, label: <Link to="/admin/tokens">访问令牌</Link> },
+              { key: '/admin/admin-guide', icon: <BookOutlined />, label: <Link to="/admin/admin-guide">使用准则</Link> },
+              {
+                key: '/docs',
+                icon: <FileTextOutlined />,
+                // 开放接口文档是独立布局（没有后台侧边栏），新窗口打开更合适
+                label: (
+                  <a href="/docs" target="_blank" rel="noreferrer">
+                    接口文档
+                  </a>
+                ),
+              },
+              { key: '/admin/settings', icon: <SettingOutlined />, label: <Link to="/admin/settings">系统设置</Link> },
+            ]
+          : []),
+      ],
+    },
   ];
 
-  // 让 /admin/orders/123 这类子路径也能高亮父菜单
+  // 让 /admin/orders/123 这类子路径也能高亮父菜单。
+  //
+  // 菜单改成分组后 items 里混了 type:'group' 的节点（没有 key，有 children），
+  // 所以这里必须递归拍平后再取 key —— 直接 map(i => i.key) 会拿到 undefined。
+  const flatKeys: string[] = [];
+  const collectKeys = (list: MenuProps['items']) => {
+    (list ?? []).forEach((i) => {
+      if (!i) return;
+      if ('children' in i && Array.isArray(i.children)) {
+        collectKeys(i.children as MenuProps['items']);
+      } else if (typeof i.key === 'string') {
+        flatKeys.push(i.key);
+      }
+    });
+  };
+  collectKeys(items);
+
   const selectedKey =
-    items
-      .map((i) => i.key)
+    flatKeys
       .filter((k) => k !== '/admin' && location.pathname.startsWith(k))
       .sort((a, b) => b.length - a.length)[0] ?? '/admin';
 
@@ -104,6 +161,15 @@ export default function AppLayout() {
           }}
         >
           <span style={{ fontWeight: 600, color: '#1a1f36' }}>多平台卡密采购与统一发货</span>
+          <Space size={4}>
+            {/* 暗色切换：白天/夜里运营都能看得舒服。选择会记住。 */}
+            <Tooltip title={dark ? '切换到亮色' : '切换到暗色'}>
+              <Button
+                type="text"
+                icon={dark ? <SunOutlined /> : <MoonOutlined />}
+                onClick={toggleTheme}
+              />
+            </Tooltip>
           <Dropdown
             menu={{
               items: [
@@ -129,6 +195,7 @@ export default function AppLayout() {
               </Tag>
             </span>
           </Dropdown>
+          </Space>
         </Header>
 
         <Content style={{ padding: 20 }}>

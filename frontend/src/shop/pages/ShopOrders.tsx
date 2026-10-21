@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+﻿import { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Button, Card, Space, Table, Tag, Typography, message } from 'antd';
 import { ReloadOutlined } from '@ant-design/icons';
@@ -125,7 +125,7 @@ export default function ShopOrders() {
           </Space>
         }
       >
-        <Table
+        <Table scroll={{ x: 'max-content' }}
           rowKey="id"
           columns={columns}
           dataSource={rows}

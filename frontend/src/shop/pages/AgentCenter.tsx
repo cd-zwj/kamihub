@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+﻿import { useCallback, useEffect, useState } from 'react';
 import {
   Alert,
   Button,
@@ -91,7 +91,7 @@ export default function AgentCenter() {
 
   // ---------- 档位说明表（未开通销售也能看，用于激励）----------
   const tierTable = (
-    <Table
+    <Table scroll={{ x: 'max-content' }}
       rowKey="code"
       size="small"
       pagination={false}
@@ -285,7 +285,7 @@ export default function AgentCenter() {
             key: 'prices',
             label: '专价目表',
             children: (
-              <Table
+              <Table scroll={{ x: 'max-content' }}
                 rowKey="listing_id"
                 size="small"
                 loading={loading}
@@ -335,7 +335,7 @@ export default function AgentCenter() {
                 <Paragraph type="secondary" style={{ fontSize: 13 }}>
                   统计口径：近 30 天内已发货订单。退款/失败订单不计入。
                 </Paragraph>
-                <Table
+                <Table scroll={{ x: 'max-content' }}
                   rowKey="day"
                   size="small"
                   dataSource={trend}

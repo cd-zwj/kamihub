@@ -250,6 +250,8 @@ func (h *Handlers) Register(r *gin.Engine) {
 		authed.POST("/auth/totp/recovery-codes", h.totpRecoveryCodes)
 
 		authed.GET("/dashboard/stats", h.dashboardStats)
+		// 迭代 4：图表看板数据（一次返回 6 组，避免首屏 6 次请求闪烁）
+		authed.GET("/dashboard/charts", h.dashboardCharts)
 
 		authed.GET("/strategies", h.listStrategies)
 		authed.GET("/adapters", h.listAdapters)

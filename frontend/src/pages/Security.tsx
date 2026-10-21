@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+﻿import { useCallback, useEffect, useState } from 'react';
 import {
   Alert,
   Button,
@@ -413,7 +413,7 @@ function RiskRules() {
         message="改完立刻生效，不需要重启"
         description="规则按「优先级」从小到大依次评估；命中取最严格的一条作为结论。放行/复核/拒绝三档：复核不拦单，只记进人工队列。"
       />
-      <Table rowKey="id" size="small" loading={loading} dataSource={rows} columns={columns} pagination={false} />
+      <Table scroll={{ x: 'max-content' }} rowKey="id" size="small" loading={loading} dataSource={rows} columns={columns} pagination={false} />
     </Card>
   );
 }
@@ -551,7 +551,7 @@ function RiskHits() {
         message="买家说「我没违规为什么被拦」时，来这里查"
         description="每一条命中都记了当时的实际值与阈值。复核结论只影响人工判断，不会自动改判已经发出的订单。"
       />
-      <Table
+      <Table scroll={{ x: 'max-content' }}
         rowKey="id"
         size="small"
         loading={loading}
@@ -680,7 +680,7 @@ function BlacklistPanel() {
         message="强烈建议设置过期时间"
         description="永久黑名单积累多了会误伤：共享 IP、运营商 NAT、公司出口都可能一改就换人。默认填 0 表示永久。"
       />
-      <Table
+      <Table scroll={{ x: 'max-content' }}
         rowKey="id"
         size="small"
         loading={loading}

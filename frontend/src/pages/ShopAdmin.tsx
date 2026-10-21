@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+﻿import { useCallback, useEffect, useState } from 'react';
 import {
   Alert,
   Button,
@@ -319,7 +319,7 @@ function BuyersTab() {
         </Button>
       </Space>
 
-      <Table
+      <Table scroll={{ x: 'max-content' }}
         rowKey="id"
         columns={columns}
         dataSource={rows}
@@ -373,7 +373,7 @@ function BuyersTab() {
             )}
 
             <Title level={5}>余额流水</Title>
-            <Table
+            <Table scroll={{ x: 'max-content' }}
               rowKey="id"
               size="small"
               dataSource={txs}
@@ -690,7 +690,7 @@ function ListingsTab() {
         description="买家看到的价格来自这里的「售价」字段，与内部商品的 price 无关。未上架或售价为 0 的商品不会出现在商城里。"
       />
 
-      <Table
+      <Table scroll={{ x: 'max-content' }}
         rowKey="id"
         columns={columns}
         dataSource={rows}
@@ -957,7 +957,7 @@ function RechargeCodesTab() {
         />
       )}
 
-      <Table
+      <Table scroll={{ x: 'max-content' }}
         rowKey="id"
         columns={columns}
         dataSource={rows}
@@ -1079,7 +1079,7 @@ function ShopOrdersTab() {
         </Button>
       </Space>
 
-      <Table
+      <Table scroll={{ x: 'max-content' }}
         rowKey="id"
         columns={columns}
         dataSource={rows}

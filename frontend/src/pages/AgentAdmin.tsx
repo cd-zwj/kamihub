@@ -132,7 +132,7 @@ function Applications() {
         message="建议先只开「零售 + 铜牌」两档，跑一周再放开高档位"
         description="通过后对方立刻按所选档位拿货。首次开通建议给 retail，等人工核对几笔价格无误后再手动改档。"
       />
-      <Table
+      <Table scroll={{ x: 'max-content' }}
         rowKey="id"
         size="small"
         loading={loading}
@@ -355,7 +355,7 @@ function AgentList() {
         message="手动改档位立即生效，不用等每日重算"
         description="每日重算会按近 30 天销量重新覆盖手动改的档位 —— 如果要长期锁档，请把该档位的阈值改成 0 或直接冻结。"
       />
-      <Table
+      <Table scroll={{ x: 'max-content' }}
         rowKey="id"
         size="small"
         loading={loading}
@@ -502,7 +502,7 @@ function TierConfig() {
         message="改档位前先算一遍：专价必须 ≥ 保底线，否则该档位会自动失效并回落"
         description="保底线 = max(成本×1.02, (成本+零售×最低净利率)/(1−手续费率))。最低净利率有 2% 硬编码下限，配不到更低。零售档的折扣率锁死为 1，不能改也不能停用。"
       />
-      <Table rowKey="id" size="small" loading={loading} dataSource={rows} columns={columns} pagination={false} />
+      <Table scroll={{ x: 'max-content' }} rowKey="id" size="small" loading={loading} dataSource={rows} columns={columns} pagination={false} />
 
       <Modal
         title={editing ? `编辑档位 · ${editing.name}` : '编辑档位'}
@@ -622,7 +622,7 @@ function TierPrices() {
         message="只给特殊商品用：清库存特价、或成本结构特殊的商品"
         description="没配覆盖的商品按「零售价 × 档位折扣率」自动算。配了覆盖价仍然要过保底校验 —— 低于保底线会回落。"
       />
-      <Table
+      <Table scroll={{ x: 'max-content' }}
         rowKey="id"
         size="small"
         loading={loading}

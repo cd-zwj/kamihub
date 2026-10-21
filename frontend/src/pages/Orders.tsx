@@ -13,6 +13,140 @@ import {
 import { copyText, fmtTime, money, newRequestId, untilText, yuan } from '@/utils/format';
 import { useAuth } from '@/auth/AuthContext';
 
+/**
+ * 订单生命周期时间线（迭代 4 · U7）。
+ *
+ * 把「订单本身的节点」和「每次货源尝试」串成一条时间线：
+ *
+ *   ● 下单          10:23:01
+ *   ● 选源          命中策略 priority（3 个候选）
+ *   ● 上游下单      16688 / SG20001   820ms
+ *   ● 发货完成      卡密 1 张          33s
+ *
+ * 为什么要这个：原来只有「尝试记录」，运营看不出「这单卡在哪个阶段」，
+ * 排查时得自己对时间戳。数据全部来自 orders + order_attempts，不需要新表。
+ */
+function OrderTimeline({ order, attempts }: { order: Order; attempts: OrderAttempt[] }) {
+  type Node = { color: string; label: string; time?: string; detail?: React.ReactNode };
+
+  const nodes: Node[] = [];
+  nodes.push({
+    color: 'blue',
+    label: '下单',
+    time: fmtTime(order.created_at),
+    detail: (
+      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+        单号 {order.order_no}
+        {order.remark ? ` · ${order.remark}` : ''}
+      </Typography.Text>
+    ),
+  });
+
+  // 每次货源尝试（按发生顺序）
+  attempts.forEach((a, idx) => {
+    nodes.push({
+      color: a.success ? 'green' : 'red',
+      label: a.success ? `第 ${idx + 1} 次尝试成功` : `第 ${idx + 1} 次尝试失败`,
+      time: undefined,
+      detail: (
+        <Space direction="vertical" size={0}>
+          <span style={{ fontSize: 13 }}>
+            <b>{a.platform_name}</b>
+            {!a.success && (
+              <Typography.Text type="danger" style={{ marginLeft: 6, fontSize: 12 }}>
+                {FAIL_KIND_TEXT[a.fail_kind] || a.fail_kind}
+              </Typography.Text>
+            )}
+            <Typography.Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>
+              {a.elapsed_ms}ms
+            </Typography.Text>
+          </span>
+          {a.error_msg && (
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              {a.error_msg}
+            </Typography.Text>
+          )}
+        </Space>
+      ),
+    });
+  });
+
+  // 发货 / 失败 收尾
+  if (order.status === 'delivered') {
+    const cardCount = (() => {
+      try {
+        const raw = order.cards;
+        return Array.isArray(raw) ? raw.length : 0;
+      } catch {
+        return 0;
+      }
+    })();
+    const elapsed =
+      order.delivered_at && order.created_at
+        ? Math.max(
+            0,
+            Math.round(
+              (new Date(order.delivered_at).getTime() - new Date(order.created_at).getTime()) / 1000,
+            ),
+          )
+        : undefined;
+    nodes.push({
+      color: 'green',
+      label: '发货完成',
+      time: fmtTime(order.delivered_at),
+      detail: (
+        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          {cardCount > 0 ? `卡密 ${cardCount} 张` : '内容已发放'}
+          {elapsed !== undefined && ` · 全程 ${elapsed}s`}
+        </Typography.Text>
+      ),
+    });
+  } else if (order.status === 'failed') {
+    nodes.push({
+      color: 'red',
+      label: '采购失败',
+      time: fmtTime(order.updated_at),
+      detail: (
+        <Typography.Text type="danger" style={{ fontSize: 12 }}>
+          {order.error_msg || '所有货源均不可用'}
+        </Typography.Text>
+      ),
+    });
+  } else if (order.status === 'purchasing') {
+    nodes.push({
+      color: 'orange',
+      label: '等待上游发货',
+      time: fmtTime(order.updated_at),
+      detail: (
+        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          上游单号 {order.platform_trade_no || '—'}，可点「重新查单」补偿
+        </Typography.Text>
+      ),
+    });
+  }
+
+  return (
+    <Timeline
+      items={nodes.map((n) => ({
+        color: n.color,
+        children: (
+          <Space direction="vertical" size={2}>
+            <Space size={8}>
+              <b>{n.label}</b>
+              {n.time && (
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  {n.time}
+                </Typography.Text>
+              )}
+            </Space>
+            {n.detail}
+          </Space>
+        ),
+      }))}
+    />
+  );
+}
+
 export default function Orders() {
   const { isAdmin } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -470,30 +604,12 @@ export default function Orders() {
                 </Space>
               }
             >
-              {attempts.length === 0 ? (
-                <Typography.Text type="secondary">无记录</Typography.Text>
-              ) : (
-                <Timeline
-                  items={attempts.map((a) => ({
-                    color: a.success ? 'green' : 'red',
-                    children: (
-                      <Space direction="vertical" size={0}>
-                        <span>
-                          <b>{a.platform_name}</b> · {a.success ? '成功' : FAIL_KIND_TEXT[a.fail_kind] || a.fail_kind}
-                          <Typography.Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>
-                            {a.elapsed_ms}ms
-                          </Typography.Text>
-                        </span>
-                        {a.error_msg && (
-                          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                            {a.error_msg}
-                          </Typography.Text>
-                        )}
-                      </Space>
-                    ),
-                  }))}
-                />
-              )}
+              {/* ---------------- 生命周期时间线（迭代 4 · U7） ----------------
+                  原来只列「每次尝试」，运营看不出「这单现在卡在哪个阶段」。
+                  现在把订单本身的节点（下单/命中货源/上游下单/发货/失败）和
+                  每次尝试合到一条时间线上，一眼看到全流程。
+                  数据全部来自现有 orders + order_attempts，不需要新表。 */}
+              <OrderTimeline order={detail.order} attempts={attempts} />
             </Card>
           </>
         )}

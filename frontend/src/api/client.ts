@@ -1,8 +1,8 @@
-import axios, { AxiosError } from 'axios';
+﻿import axios, { AxiosError } from 'axios';
 import { message } from 'antd';
 import type {
   AdapterMeta, AdminAgentRow, AdminPriceTier, AdminTierPrice, AllSettings, AuditLog, BlacklistEntry,
-  CallLog, CaptchaChallenge, CardListResult, CardStats, DashboardStats, Delivery, DeliveryView, Envelope,
+  CallLog, CaptchaChallenge, CardListResult, CardStats, DashboardCharts, DashboardStats, Delivery, DeliveryView, Envelope,
   Goods, LoginResult, Notification, NotifyStatus, Order, OrderAttempt, PageResult, Platform, ReconcileDiff,
   RiskHit, RiskRule, StrategyMeta, Supply, TOTPSetupResult, TOTPStatus, User, WorkerTask, WorkerTaskRun,
 } from './types';
@@ -197,6 +197,8 @@ export const api = {
 
   // ---------- 概览 ----------
   stats: () => unwrap<DashboardStats>(http.get('/dashboard/stats')),
+  /** 迭代 4：图表看板（6 组数据一次返回，避免首屏 6 次请求闪烁） */
+  charts: (days = 14) => unwrap<DashboardCharts>(http.get('/dashboard/charts', { params: { days } })),
 
   // ---------- 元数据 ----------
   adapters: () => unwrap<{ list: AdapterMeta[] }>(http.get('/adapters')),

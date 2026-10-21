@@ -213,6 +213,81 @@ export const AGENT_STATUS_COLOR: Record<number, string> = {
   2: 'red',
 };
 
+// ---------------------------------------------------------------- 迭代 4：图表看板
+
+/** 每日订单量 / 销售额 / 毛利 */
+export interface ChartDailyRow {
+  day: string;
+  orders: number;
+  gmv: number;
+  cost: number;
+  profit: number;
+}
+
+/** 订单状态分布 */
+export interface ChartStatusRow {
+  status: string;
+  count: number;
+}
+
+/** 货源成本对比 */
+export interface ChartSupplyCost {
+  supply_id: number;
+  platform: string;
+  goods_name: string;
+  goods_no: string;
+  cost_price: number;
+  stock: number;
+}
+
+/** 各上游成功率 */
+export interface ChartPlatformRate {
+  platform_id: number;
+  name: string;
+  total: number;
+  delivered: number;
+  failed: number;
+  success_rate: number;
+}
+
+/** 每日消耗 */
+export interface ChartSpendRow {
+  day: string;
+  spend: number;
+}
+
+/** 平台余额 */
+export interface ChartBalance {
+  platform_id: number;
+  name: string;
+  balance: number;
+  enabled: boolean;
+}
+
+/** 商品销量 TOP */
+export interface ChartTopGoods {
+  goods_id: number;
+  name: string;
+  orders: number;
+  amount: number;
+}
+
+/** 图表看板全部数据 */
+export interface DashboardCharts {
+  days: number;
+  daily: ChartDailyRow[];
+  status_dist: ChartStatusRow[];
+  supply_costs: ChartSupplyCost[];
+  platform_rates: ChartPlatformRate[];
+  spend_trend: ChartSpendRow[];
+  balances: ChartBalance[];
+  avg_daily_spend: number;
+  total_balance: number;
+  /** 预计可用天数；-1 表示无法估算（没有消耗数据） */
+  days_left: number;
+  top_goods: ChartTopGoods[];
+}
+
 export interface CredentialField {
   key: string;
   label: string;

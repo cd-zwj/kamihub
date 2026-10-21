@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+﻿import { useCallback, useEffect, useState } from 'react';
 import {
   Button,
   Card,
@@ -263,7 +263,7 @@ export default function ShopWallet() {
           </Button>
         }
       >
-        <Table
+        <Table scroll={{ x: 'max-content' }}
           rowKey="id"
           columns={columns}
           dataSource={rows}
