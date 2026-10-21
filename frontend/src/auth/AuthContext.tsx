@@ -6,7 +6,15 @@ interface AuthState {
   user: User | null;
   loading: boolean;
   isAdmin: boolean;
-  login: (username: string, password: string) => Promise<void>;
+  /**
+   * 第一步：账号密码。
+   *
+   * 返回 needTotp=true 表示该账号开了两步验证 —— 此时**没有登录成功**，
+   * 调用方必须接着走 loginTOTP；只有它成功才拿到真令牌。
+   */
+  login: (username: string, password: string) => Promise<{ needTotp: boolean; ticket?: string; setupRequired: boolean }>;
+  /** 第二步：临时票据 + 动态码/恢复码。成功后才是真正登录 */
+  loginTOTP: (ticket: string, code: string) => Promise<{ usedRecovery: boolean; hint?: string; setupRequired: boolean }>;
   logout: () => Promise<void>;
   refresh: () => Promise<void>;
 }
@@ -41,8 +49,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const login = useCallback(async (username: string, password: string) => {
     const res = await api.login(username, password);
-    tokenStore.set(res.token);
-    setUser(res.user);
+    // 开了 2FA：后端刻意不给 token，这里绝不能「当成功处理」
+    if (res.need_totp) {
+      return { needTotp: true, ticket: res.ticket, setupRequired: false };
+    }
+    tokenStore.set(res.token ?? '');
+    if (res.user) setUser(res.user);
+    return { needTotp: false, setupRequired: Boolean(res.totp_setup_required) };
+  }, []);
+
+  const loginTOTP = useCallback(async (ticket: string, code: string) => {
+    const res = await api.loginTOTP(ticket, code);
+    tokenStore.set(res.token ?? '');
+    if (res.user) setUser(res.user);
+    return {
+      usedRecovery: Boolean(res.used_recovery_code),
+      hint: res.recovery_hint,
+      setupRequired: Boolean(res.totp_setup_required),
+    };
   }, []);
 
   const logout = useCallback(async () => {
@@ -56,8 +80,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const value = useMemo<AuthState>(
-    () => ({ user, loading, isAdmin: user?.role === 'admin', login, logout, refresh }),
-    [user, loading, login, logout, refresh],
+    () => ({ user, loading, isAdmin: user?.role === 'admin', login, loginTOTP, logout, refresh }),
+    [user, loading, login, loginTOTP, logout, refresh],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

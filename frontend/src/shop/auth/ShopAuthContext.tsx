@@ -3,11 +3,17 @@ import type { ReactNode } from 'react';
 import { shopApi, shopTokenStore, setShopUnauthorizedHandler } from '@/shop/api/shopClient';
 import type { ShopBuyer } from '@/shop/api/shopClient';
 
+/** 验证码答案：前端拿到题目后让用户填写，再连同 id 一起提交 */
+export interface CaptchaInput {
+  captcha_id: string;
+  captcha_answer: string;
+}
+
 interface ShopAuthState {
   buyer: ShopBuyer | null;
   loading: boolean;
-  login: (username: string, password: string) => Promise<void>;
-  register: (username: string, email: string, password: string) => Promise<void>;
+  login: (username: string, password: string, captcha?: CaptchaInput) => Promise<void>;
+  register: (username: string, email: string, password: string, captcha?: CaptchaInput) => Promise<void>;
   logout: () => void;
   /** 刷新买家信息（下单/充值后余额会变，需要同步到顶栏） */
   refresh: () => Promise<void>;
@@ -46,17 +52,33 @@ export function ShopAuthProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  const login = useCallback(async (username: string, password: string) => {
-    const res = await shopApi.login(username, password);
-    shopTokenStore.set(res.token);
-    setBuyer(res.buyer);
-  }, []);
+  const login = useCallback(
+    async (username: string, password: string, captcha?: { captcha_id: string; captcha_answer: string }) => {
+      const res = await shopApi.login(username, password, captcha);
+      shopTokenStore.set(res.token);
+      setBuyer(res.buyer);
+    },
+    [],
+  );
 
-  const register = useCallback(async (username: string, email: string, password: string) => {
-    const res = await shopApi.register({ username, email: email || undefined, password });
-    shopTokenStore.set(res.token);
-    setBuyer(res.buyer);
-  }, []);
+  const register = useCallback(
+    async (
+      username: string,
+      email: string,
+      password: string,
+      captcha?: { captcha_id: string; captcha_answer: string },
+    ) => {
+      const res = await shopApi.register({
+        username,
+        email: email || undefined,
+        password,
+        ...captcha,
+      });
+      shopTokenStore.set(res.token);
+      setBuyer(res.buyer);
+    },
+    [],
+  );
 
   const logout = useCallback(() => {
     shopApi.logout().catch(() => undefined);

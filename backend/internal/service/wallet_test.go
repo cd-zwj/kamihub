@@ -1,4 +1,4 @@
-package service
+﻿package service
 
 import (
 	"context"
@@ -54,6 +54,8 @@ func testDB(t *testing.T) *gorm.DB {
 		// 采购尝试记录与上游平台/货源：混合库存模式用例需要
 		// （order_attempts 不迁移的话，下单用例一建订单就会报 relation does not exist）
 		&models.OrderAttempt{}, &models.Platform{}, &models.Supply{},
+		// 迭代 2 安全加固：2FA 恢复码、风控规则/命中、黑名单
+		&models.User{}, &models.UserRecoveryCode{}, &models.RiskRule{}, &models.RiskHit{}, &models.Blacklist{},
 		// 支付相关：settings 存支付配置，payment_orders 存支付单
 		&models.Setting{}, &models.PaymentOrder{},
 	); err != nil {

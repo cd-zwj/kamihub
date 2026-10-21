@@ -15,6 +15,7 @@ import Tokens from '@/pages/Tokens';
 import Logs from '@/pages/Logs';
 import ShopAdmin from '@/pages/ShopAdmin';
 import PaymentAdmin from '@/pages/PaymentAdmin';
+import Security from '@/pages/Security';
 import AdminGuide from '@/docs/AdminGuide';
 
 function FullScreenSpin() {
@@ -60,6 +61,8 @@ export default function AdminApp() {
         <Route path="/admin/goods" element={<Goods />} />
         <Route path="/admin/platforms" element={<Platforms />} />
         <Route path="/admin/logs" element={<Logs />} />
+        {/* 账号安全对所有员工开放：operator 也应该能给自己绑 2FA */}
+        <Route path="/admin/security" element={<Security />} />
         {/* 以下仅管理员可见，非管理员访问会被兜底路由弹回概览 */}
         {isAdmin && <Route path="/admin/shop-admin" element={<ShopAdmin />} />}
         {isAdmin && <Route path="/admin/payment-admin" element={<PaymentAdmin />} />}

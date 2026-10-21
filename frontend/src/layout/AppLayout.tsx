@@ -3,8 +3,8 @@ import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { Avatar, Dropdown, Form, Input, Layout, Menu, Modal, Tag, message } from 'antd';
 import {
   ApiOutlined, AppstoreOutlined, BookOutlined, DashboardOutlined, FileSearchOutlined,
-  FileTextOutlined, ImportOutlined, KeyOutlined, LinkOutlined, LogoutOutlined, SettingOutlined,
-  ShoppingCartOutlined, TeamOutlined, ThunderboltOutlined, UserOutlined, WalletOutlined,
+  FileTextOutlined, ImportOutlined, KeyOutlined, LinkOutlined, LogoutOutlined, SafetyOutlined,
+  SettingOutlined, ShoppingCartOutlined, TeamOutlined, ThunderboltOutlined, UserOutlined, WalletOutlined,
 } from '@ant-design/icons';
 import { api } from '@/api/client';
 import { useAuth } from '@/auth/AuthContext';
@@ -30,6 +30,9 @@ export default function AppLayout() {
     { key: '/admin/goods', icon: <AppstoreOutlined />, label: <Link to="/admin/goods">商品与货源</Link> },
     { key: '/admin/platforms', icon: <ApiOutlined />, label: <Link to="/admin/platforms">平台管理</Link> },
     { key: '/admin/logs', icon: <FileSearchOutlined />, label: <Link to="/admin/logs">日志</Link> },
+    // 账号安全对所有员工开放（operator 也该能给自己绑 2FA）；
+    // 里面的风控/黑名单面板只有管理员能改，非管理员点了会 403。
+    { key: '/admin/security', icon: <SafetyOutlined />, label: <Link to="/admin/security">安全与风控</Link> },
     ...(isAdmin
       ? [
           { key: '/admin/shop-admin', icon: <WalletOutlined />, label: <Link to="/admin/shop-admin">C 端商城</Link> },

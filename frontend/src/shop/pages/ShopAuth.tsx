@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { Button, Card, Form, Input, Tabs, Typography, message } from 'antd';
-import { LockOutlined, MailOutlined, ShopOutlined, UserOutlined } from '@ant-design/icons';
+import { Button, Card, Form, Input, Space, Tabs, Typography, message } from 'antd';
+import { LockOutlined, MailOutlined, SafetyOutlined, ShopOutlined, UserOutlined } from '@ant-design/icons';
 import { useShopAuth } from '@/shop/auth/ShopAuthContext';
+import { shopApi } from '@/shop/api/shopClient';
 
 const { Title, Text } = Typography;
 
@@ -14,38 +15,117 @@ export default function ShopAuth() {
   const [tab, setTab] = useState<'login' | 'register'>('login');
   const [loading, setLoading] = useState(false);
 
+  // 验证码状态。注册强制要求；登录只在「失败过一次」后被后端要求，
+  // 所以这里始终备着题目，登录失败时自动展示出来。
+  const [captcha, setCaptcha] = useState<{ id: string; question: string } | null>(null);
+  const [captchaLoading, setCaptchaLoading] = useState(false);
+  const [loginNeedsCaptcha, setLoginNeedsCaptcha] = useState(false);
+
+  const refreshCaptcha = useCallback(async () => {
+    setCaptchaLoading(true);
+    try {
+      const ch = await shopApi.captcha();
+      setCaptcha({ id: ch.captcha_id, question: ch.question });
+    } catch {
+      // 验证码服务不可用时后端会放行；这里不阻断用户操作
+      setCaptcha(null);
+    } finally {
+      setCaptchaLoading(false);
+    }
+  }, []);
+
   // 已登录直接回商城
   useEffect(() => {
     if (buyer) navigate('/', { replace: true });
   }, [buyer, navigate]);
 
+  // 注册 tab 一进来就取题
+  useEffect(() => {
+    if (tab === 'register' && !captcha) void refreshCaptcha();
+  }, [tab, captcha, refreshCaptcha]);
+
   const from = (location.state as { from?: string } | null)?.from || '/';
 
-  const onLogin = async (values: { username: string; password: string }) => {
+  const onLogin = async (values: { username: string; password: string; captcha_answer?: string }) => {
     setLoading(true);
     try {
-      await login(values.username, values.password);
+      const cap =
+        loginNeedsCaptcha && captcha
+          ? { captcha_id: captcha.id, captcha_answer: values.captcha_answer || '' }
+          : undefined;
+      await login(values.username, values.password, cap);
       message.success('登录成功');
       navigate(from, { replace: true });
     } catch (e) {
-      message.error(e instanceof Error ? e.message : '登录失败');
+      const msg = e instanceof Error ? e.message : '登录失败';
+      message.error(msg);
+      // 后端提示需要验证码 → 取一道题并展开输入框
+      if (msg.includes('验证码')) {
+        setLoginNeedsCaptcha(true);
+        void refreshCaptcha();
+      }
     } finally {
       setLoading(false);
     }
   };
 
-  const onRegister = async (values: { username: string; email?: string; password: string }) => {
+  const onRegister = async (values: {
+    username: string;
+    email?: string;
+    password: string;
+    captcha_answer?: string;
+  }) => {
     setLoading(true);
     try {
-      await register(values.username, values.email || '', values.password);
+      const cap = captcha ? { captcha_id: captcha.id, captcha_answer: values.captcha_answer || '' } : undefined;
+      await register(values.username, values.email || '', values.password, cap);
       message.success('注册成功，已自动登录');
       navigate('/', { replace: true });
     } catch (e) {
       message.error(e instanceof Error ? e.message : '注册失败');
+      // 验证码是一次性的：无论成功失败都要换一道
+      void refreshCaptcha();
     } finally {
       setLoading(false);
     }
   };
+
+  /** 验证码输入行：题目 + 输入框 + 换一张 */
+  const captchaItem = (
+    <Form.Item
+      label="验证码"
+      required
+      extra={
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          验证码 3 分钟内有效，用过即作废
+        </Text>
+      }
+    >
+      <Space.Compact style={{ width: '100%' }}>
+        <Form.Item
+          name="captcha_answer"
+          noStyle
+          rules={[{ required: true, message: '请输入验证码答案' }]}
+        >
+          <Input
+            size="large"
+            prefix={<SafetyOutlined />}
+            placeholder="计算结果"
+            autoComplete="off"
+          />
+        </Form.Item>
+        <Button
+          size="large"
+          loading={captchaLoading}
+          onClick={() => void refreshCaptcha()}
+          style={{ minWidth: 132, fontFamily: 'monospace' }}
+          title="点击换一道"
+        >
+          {captcha ? captcha.question : '获取验证码'}
+        </Button>
+      </Space.Compact>
+    </Form.Item>
+  );
 
   return (
     <div style={{ maxWidth: 420, margin: '40px auto' }}>
@@ -86,6 +166,7 @@ export default function ShopAuth() {
                       autoComplete="current-password"
                     />
                   </Form.Item>
+                  {loginNeedsCaptcha && captchaItem}
                   <Button type="primary" htmlType="submit" size="large" block loading={loading}>
                     登录
                   </Button>
@@ -166,6 +247,7 @@ export default function ShopAuth() {
                       autoComplete="new-password"
                     />
                   </Form.Item>
+                  {captchaItem}
                   <Button type="primary" htmlType="submit" size="large" block loading={loading}>
                     注册并登录
                   </Button>

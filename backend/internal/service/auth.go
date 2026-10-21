@@ -72,6 +72,10 @@ func (s *AuthService) DefaultTTL(ctx context.Context) time.Duration {
 }
 
 // Login 校验账号密码并签发 JWT。
+//
+// 账号开了两步验证时，这里**不签发令牌**，而是返回 ErrTOTPRequired 和已校验的用户：
+// 调用方必须再走一次 TOTP 校验（换成临时票据 → 验码 → 才签发）。
+// 这样即使密码泄露，攻击者也拿不到任何可用权限。
 func (s *AuthService) Login(ctx context.Context, username, password, ip string) (*IssuedToken, *models.User, error) {
 	var user models.User
 	if err := s.db.WithContext(ctx).Where("username = ?", username).First(&user).Error; err != nil {
@@ -89,23 +93,47 @@ func (s *AuthService) Login(ctx context.Context, username, password, ip string) 
 		return nil, nil, ErrUserDisabled
 	}
 
+	// 密码正确但还需要第二步：立刻返回，绝不签发令牌。
+	// 此时也不更新 last_login_at —— 那次登录还没真正完成；
+	// 否则「只过了密码」的尝试会被记成一次成功登录，审计就失真了。
+	if user.TOTPEnabled {
+		return nil, &user, ErrTOTPRequired
+	}
+
 	issued, err := s.IssueToken(ctx, &user, 0)
 	if err != nil {
 		return nil, nil, err
 	}
 
+	s.touchLogin(ctx, &user, ip)
+	return issued, &user, nil
+}
+
+// CompleteTOTPLogin 在二次验证通过后收尾：签发令牌并记录登录。
+//
+// 与 Login 分开是为了让「密码通过」和「2FA 通过」各有一处落点，
+// 谁先谁后一目了然，不会出现「某条分支忘了检查 2FA」。
+func (s *AuthService) CompleteTOTPLogin(ctx context.Context, user *models.User, ip string) (*IssuedToken, error) {
+	issued, err := s.IssueToken(ctx, user, 0)
+	if err != nil {
+		return nil, err
+	}
+	s.touchLogin(ctx, user, ip)
+	return issued, nil
+}
+
+// touchLogin 记录最后登录时间与 IP。失败不影响登录本身。
+func (s *AuthService) touchLogin(ctx context.Context, user *models.User, ip string) {
 	now := time.Now()
-	if err := s.db.WithContext(ctx).Model(&user).Updates(map[string]any{
+	if err := s.db.WithContext(ctx).Model(user).Updates(map[string]any{
 		"last_login_at": now,
 		"last_login_ip": ip,
 	}).Error; err != nil {
 		// 登录统计失败不该影响登录本身
-		_ = err
+		return
 	}
 	user.LastLoginAt = &now
 	user.LastLoginIP = ip
-
-	return issued, &user, nil
 }
 
 // IssueToken 签发 JWT。

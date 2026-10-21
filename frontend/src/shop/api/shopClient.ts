@@ -207,14 +207,23 @@ export interface ShopPaymentOrder {
 
 export const shopApi = {
   // ---------- 认证 ----------
-  register: (body: { username: string; email?: string; password: string }) =>
+  register: (body: {
+    username: string;
+    email?: string;
+    password: string;
+    /** 验证码（注册强制） */
+    captcha_id?: string;
+    captcha_answer?: string;
+  }) =>
     unwrap<{ token: string; expires_at: string; buyer: ShopBuyer }>(
       http.post('/auth/register', body),
     ),
-  login: (username: string, password: string) =>
+  login: (username: string, password: string, captcha?: { captcha_id: string; captcha_answer: string }) =>
     unwrap<{ token: string; expires_at: string; buyer: ShopBuyer }>(
-      http.post('/auth/login', { username, password }),
+      http.post('/auth/login', { username, password, ...captcha }),
     ),
+  /** 取一道验证码（公开，无需登录） */
+  captcha: () => unwrap<{ captcha_id: string; question: string; expires_in: number }>(http.get('/captcha')),
   me: () => unwrap<ShopBuyer>(http.get('/auth/me')),
   logout: () => unwrap<{ message: string }>(http.post('/auth/logout')),
   changePassword: (old_password: string, new_password: string) =>

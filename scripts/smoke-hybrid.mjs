@@ -34,6 +34,35 @@ async function api(path, { method = 'GET', body } = {}) {
   return { status: res.status, json };
 }
 
+/**
+ * 取一道验证码并解出答案。
+ *
+ * 注册接口现在强制验证码。这个函数刻意「真的去解题」而不是走后门：
+ * 验证码的设计目标是「真人 3 秒、脚本成本 ×100」，
+ * 而能看懂算术题的脚本正是它挡不住的那一类 —— 用它来跑冒烟是合理的，
+ * 同时也就顺带验证了「题目可解、答案可提交」这条链路是通的。
+ */
+async function solveCaptcha() {
+  const ch = await api('/api/captcha');
+  const q = ch.json?.data?.question || '';
+  const id = ch.json?.data?.captcha_id || '';
+  const m = q.match(/(-?\d+)\s*([+\-])\s*(-?\d+)/);
+  if (!m) throw new Error(`无法解析验证码题目: ${q}`);
+  const a = Number(m[1]);
+  const b = Number(m[3]);
+  const answer = m[2] === '+' ? a + b : a - b;
+  return { captcha_id: id, captcha_answer: String(answer) };
+}
+
+/** 注册买家（自动过验证码） */
+async function registerBuyer(username, password) {
+  const cap = await solveCaptcha();
+  return api('/api/shop/auth/register', {
+    method: 'POST',
+    body: { username, password, ...cap },
+  });
+}
+
 async function main() {
   // ---- 1. 登录 ----
   const login = await api('/api/auth/login', {
@@ -135,10 +164,7 @@ async function main() {
 
   // ---- 8. 买家下单：池子优先，应吃掉池子的卡密而不是走上游 ----
   const buyerName = `smk${tag}`;
-  const reg = await api('/api/shop/auth/register', {
-    method: 'POST',
-    body: { username: buyerName, password: 'buyer123456' },
-  });
+  const reg = await registerBuyer(buyerName, 'buyer123456');
   const buyerToken = reg.json?.data?.token || '';
   check('注册买家', Boolean(buyerToken), `status=${reg.status} msg=${reg.json?.msg || ''}`);
 
@@ -253,10 +279,7 @@ async function main() {
 
   if (goodsBId && platformBId && listingBId) {
     const buyerB = `smb${tag}`;
-    const regB = await api('/api/shop/auth/register', {
-      method: 'POST',
-      body: { username: buyerB, password: 'buyer123456' },
-    });
+    const regB = await registerBuyer(buyerB, 'buyer123456');
     const tokenB = regB.json?.data?.token || '';
     const buyerBId = regB.json?.data?.buyer?.id ?? regB.json?.data?.id;
     check('[B] 注册买家', Boolean(tokenB), `status=${regB.status}`);

@@ -80,6 +80,12 @@ type deps struct {
 	notifier *notify.Notifier
 	renderer *render.Renderer
 	routes   *routing.Registry
+
+	// ---------- 迭代 2：安全加固 ----------
+	totp    *service.TOTPService
+	captcha *service.CaptchaService
+	risk    *service.RiskService
+
 	// workerRunner 定时任务调度器。为 nil 表示当前模式不跑任务。
 	workerRunner *worker.Runner
 }
@@ -272,6 +278,15 @@ func bootstrap(cfg *config.Config) (*deps, error) {
 	reconcileCfg := service.DefaultReconcileConfig()
 	reconcile := service.NewReconcileService(db, platforms, reconcileCfg)
 
+	// ---------- 迭代 2：安全加固 ----------
+	totpSvc := service.NewTOTPService(db, cfg, c)
+	captchaSvc := service.NewCaptchaService(c)
+	riskSvc := service.NewRiskService(db, c)
+	// 播种出厂风控规则（幂等，绝不覆盖运营已调过的阈值）
+	if err := riskSvc.SeedDefaultRules(context.Background()); err != nil {
+		slog.Error("播种默认风控规则失败", "error", err.Error())
+	}
+
 	// ---------- 提货页渲染（仅 api 需要）----------
 	var renderer *render.Renderer
 	if cfg.RunsAPI() {
@@ -317,6 +332,9 @@ func bootstrap(cfg *config.Config) (*deps, error) {
 		payment:      payment,
 		reconcile:    reconcile,
 		notifier:     notifier,
+		totp:         totpSvc,
+		captcha:      captchaSvc,
+		risk:         riskSvc,
 		renderer:     renderer,
 		routes:       routes,
 		workerRunner: workerRunner,
@@ -385,6 +403,10 @@ func startHTTP(d *deps) (*http.Server, error) {
 		Reconcile:    d.reconcile,
 		Notify:       d.notifier,
 		WorkerRunner: d.workerRunner,
+
+		TOTP:    d.totp,
+		Captcha: d.captcha,
+		Risk:    d.risk,
 	})
 
 	engine := gin.New()

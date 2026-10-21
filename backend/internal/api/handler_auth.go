@@ -17,58 +17,8 @@ type loginRequest struct {
 	Password string `json:"password" binding:"required"`
 }
 
-func (h *Handlers) login(c *gin.Context) {
-	var req loginRequest
-	if !BindJSON(c, &req) {
-		return
-	}
-	req.Username = strings.TrimSpace(req.Username)
-
-	// 登录爆破防护，两层，且都只统计「失败」：
-	//
-	//  1) IP + 用户名：挡住针对某个已知账号（例如管理员）的持续爆破
-	//  2) 纯 IP：挡住靠「换用户名」绕过第一层（撞库）
-	//
-	// 为什么必须第二层：第一层的键里带了用户名，攻击者每次换一个用户名
-	// 就能重置配额。撞库（一个密码试一批账号）在这种键下几乎等于没限制。
-	//
-	// 为什么只统计失败：早期版本对每次请求都计数，结果正常用户连续登录
-	// 十次就会被自己的成功登录拖进限流。现在改成
-	//   进门前查额度（不自增）→ 失败才记账 → 成功则清零，
-	// 正常用户永远不会因为自己的正确操作被拦。
-	ip := c.ClientIP()
-	ctx := c.Request.Context()
-
-	keyPerUser := fmt.Sprintf("rl:login:%s:%s", ip, req.Username)
-	keyPerIP := fmt.Sprintf("rl:login-ip:%s", ip)
-
-	if !h.cache.AllowN(ctx, keyPerUser, 10) || !h.cache.AllowN(ctx, keyPerIP, 30) {
-		Fail(c, 429, "RATE_LIMITED", "登录尝试过于频繁，请稍后再试")
-		return
-	}
-
-	issued, user, err := h.auth.Login(ctx, req.Username, req.Password, ip)
-	if err != nil {
-		// 只有失败才消耗配额
-		h.cache.Fail(ctx, keyPerUser, time.Minute)
-		h.cache.Fail(ctx, keyPerIP, time.Minute)
-		h.auditLog(c, "auth.login_failed", "user", req.Username, gin.H{"reason": err.Error()})
-		Abort(c, err)
-		return
-	}
-
-	// 登录成功：清空失败计数，让正常用户立刻恢复额度
-	h.cache.Reset(ctx, keyPerUser, keyPerIP)
-
-	h.auditLog(c, "auth.login", "user", user.Username, nil)
-	OK(c, gin.H{
-		"token": issued.Token,
-		"user":  user,
-		// 有效期来自网页设置（回落 .env 的 JWT_TTL），这里回真实的秒数
-		"expires_in_seconds": int(time.Until(issued.ExpiresAt).Seconds()),
-		"expires_at":         issued.ExpiresAt,
-	})
-}
+// login 已迁移到 handler_auth_totp.go —— 登录现在要处理两步验证挑战，
+// 与 2FA 的其余端点放在一起才能一眼看全流程。
 
 func (h *Handlers) me(c *gin.Context) {
 	OK(c, CurrentUser(c))

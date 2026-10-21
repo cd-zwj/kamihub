@@ -1,9 +1,10 @@
 import axios, { AxiosError } from 'axios';
 import { message } from 'antd';
 import type {
-  AdapterMeta, AllSettings, AuditLog, CallLog, CardListResult, CardStats, DashboardStats, Delivery,
-  DeliveryView, Envelope, Goods, Notification, NotifyStatus, Order, OrderAttempt, PageResult,
-  Platform, ReconcileDiff, StrategyMeta, Supply, User, WorkerTask, WorkerTaskRun,
+  AdapterMeta, AllSettings, AuditLog, BlacklistEntry, CallLog, CaptchaChallenge, CardListResult, CardStats,
+  DashboardStats, Delivery, DeliveryView, Envelope, Goods, LoginResult, Notification, NotifyStatus, Order,
+  OrderAttempt, PageResult, Platform, ReconcileDiff, RiskHit, RiskRule, StrategyMeta, Supply, TOTPSetupResult,
+  TOTPStatus, User, WorkerTask, WorkerTaskRun,
 } from './types';
 
 const TOKEN_KEY = 'kamihub_token';
@@ -88,9 +89,46 @@ export interface ListQuery {
 export const api = {
   // ---------- 认证 ----------
   login: (username: string, password: string) =>
-    unwrap<{ token: string; user: User; expires_in_seconds: number }>(
-      http.post('/auth/login', { username, password }),
-    ),
+    unwrap<LoginResult>(http.post('/auth/login', { username, password })),
+
+  /**
+   * 两步验证第二步：用临时票据 + 动态码/恢复码换真令牌。
+   *
+   * 票据只能用一次，且 5 分钟过期；失败后必须重新走账号密码登录。
+   */
+  loginTOTP: (ticket: string, code: string) =>
+    unwrap<LoginResult>(http.post('/auth/totp', { ticket, code })),
+
+  // ---------- 两步验证（自己管自己） ----------
+  totpStatus: () => unwrap<TOTPStatus>(http.get('/auth/totp/status')),
+  totpSetup: () => unwrap<TOTPSetupResult>(http.post('/auth/totp/setup')),
+  totpConfirm: (code: string) =>
+    unwrap<{ recovery_codes: string[] }>(http.post('/auth/totp/confirm', { code })),
+  totpDisable: (password: string) =>
+    unwrap<{ message: string }>(http.post('/auth/totp/disable', { password })),
+  totpRecoveryCodes: (code: string) =>
+    unwrap<{ recovery_codes: string[] }>(http.post('/auth/totp/recovery-codes', { code })),
+  /** 管理员强制重置他人的 2FA（手机丢了 + 恢复码也没了的兜底） */
+  totpResetUser: (id: number) =>
+    unwrap<{ message: string }>(http.post(`/users/${id}/totp/reset`)),
+
+  // ---------- 验证码（公开） ----------
+  captcha: () => unwrap<CaptchaChallenge>(http.get('/captcha')),
+
+  // ---------- 风控 ----------
+  riskRules: () => unwrap<{ list: RiskRule[]; scenes: string[] }>(http.get('/risk/rules')),
+  updateRiskRule: (id: number, body: Partial<Pick<RiskRule, 'enabled' | 'level' | 'priority'>> & { config?: unknown }) =>
+    unwrap<RiskRule>(http.put(`/risk/rules/${id}`, body)),
+  riskHits: (params?: { page?: number; page_size?: number; subject?: string; scene?: string; level?: string; pending?: string }) =>
+    unwrap<PageResult<RiskHit>>(http.get('/risk/hits', { params })),
+  reviewRiskHit: (id: number, result: 'allow' | 'block') =>
+    unwrap<{ message: string }>(http.post(`/risk/hits/${id}/review`, { result })),
+  blacklist: (params?: { page?: number; page_size?: number; kind?: string; keyword?: string }) =>
+    unwrap<PageResult<BlacklistEntry>>(http.get('/blacklist', { params })),
+  createBlacklist: (body: { kind: string; value: string; reason?: string; expires_in_hours?: number }) =>
+    unwrap<BlacklistEntry>(http.post('/blacklist', body)),
+  deleteBlacklist: (id: number) =>
+    unwrap<{ message: string }>(http.delete(`/blacklist/${id}`)),
   me: () => unwrap<User>(http.get('/auth/me')),
   logout: () => unwrap<{ message: string }>(http.post('/auth/logout')),
   changePassword: (old_password: string, new_password: string) =>

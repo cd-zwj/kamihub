@@ -41,6 +41,11 @@ type BuyerClaims struct {
 const (
 	TokenTypeStaff = "staff"
 	TokenTypeBuyer = "buyer"
+	// TokenTypeTOTP 二次验证临时票据（不是登录令牌）。
+	//
+	// IsStaffToken() 只认 ""/staff，因此带着它的请求过不了 Auth 中间件 ——
+	// 这样「密码对、TOTP 没给」就绝不可能拿到可用权限。
+	TokenTypeTOTP = "totp"
 )
 
 // BuyerAuthService 负责买家注册、登录与令牌签发。

@@ -25,8 +25,141 @@ export interface User {
   remark: string;
   last_login_at?: string | null;
   last_login_ip: string;
+  /** 是否已开启两步验证 */
+  totp_enabled?: boolean;
+  totp_bound_at?: string | null;
   created_at: string;
 }
+
+// ---------------------------------------------------------------- 迭代 2：安全加固
+
+/**
+ * 登录接口的返回。
+ *
+ * 两种形态：
+ *  - 未开 2FA：带 token，登录完成
+ *  - 已开 2FA：带 need_totp + ticket，**没有 token**，必须再调 loginTOTP
+ *
+ * 类型上用可选字段表达，而不是两个接口 —— 前端只需判断 need_totp。
+ */
+export interface LoginResult {
+  token?: string;
+  user?: User;
+  expires_in_seconds?: number;
+  expires_at?: string;
+  /** 需要第二步验证 */
+  need_totp?: boolean;
+  /** 5 分钟一次性临时票据（不是登录令牌，调不了任何业务接口） */
+  ticket?: string;
+  totp_enabled?: boolean;
+  /** admin 尚未绑定 2FA，前端应强制引导去绑定 */
+  totp_setup_required?: boolean;
+  used_recovery_code?: boolean;
+  recovery_hint?: string;
+}
+
+export interface TOTPStatus {
+  enabled: boolean;
+  bound_at?: string | null;
+  /** 剩余可用恢复码数量，少于 3 个应提醒重新生成 */
+  recovery_left: number;
+  /** 该账号是否被强制要求绑定（admin 角色） */
+  required: boolean;
+}
+
+export interface TOTPSetupResult {
+  secret: string;
+  otpauth_url: string;
+  issuer: string;
+  account: string;
+}
+
+export interface CaptchaChallenge {
+  captcha_id: string;
+  question: string;
+  expires_in: number;
+}
+
+/** 风控规则 */
+export interface RiskRule {
+  id: number;
+  code: string;
+  name: string;
+  scene: string;
+  level: string;
+  priority: number;
+  enabled: boolean;
+  config: Record<string, unknown>;
+  description: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** 风控命中记录 */
+export interface RiskHit {
+  id: number;
+  rule_code: string;
+  scene: string;
+  subject: string;
+  level: string;
+  action: string;
+  detail?: Record<string, unknown> | null;
+  reviewed: boolean;
+  reviewed_by?: number | null;
+  reviewed_at?: string | null;
+  review_result: string;
+  created_at: string;
+}
+
+/** 黑名单条目 */
+export interface BlacklistEntry {
+  id: number;
+  kind: string;
+  value: string;
+  reason: string;
+  expires_at?: string | null;
+  created_at: string;
+}
+
+/** 风控级别中文名 */
+export const RISK_LEVEL_TEXT: Record<string, string> = {
+  pass: '放行',
+  review: '人工复核',
+  reject: '拒绝',
+};
+
+export const RISK_LEVEL_COLOR: Record<string, string> = {
+  pass: 'green',
+  review: 'orange',
+  reject: 'red',
+};
+
+/** 风控场景中文名 */
+export const RISK_SCENE_TEXT: Record<string, string> = {
+  all: '全部场景',
+  register: '注册',
+  login: '登录',
+  order: '下单',
+  withdraw: '提现',
+  commission: '分销佣金',
+};
+
+/** 黑名单类型中文名 */
+export const BLACKLIST_KIND_TEXT: Record<string, string> = {
+  ip: 'IP',
+  buyer: '买家',
+  phone: '手机号',
+  email: '邮箱',
+  bank_account: '收款账户',
+};
+
+/** 风控建议动作中文名 */
+export const RISK_ACTION_TEXT: Record<string, string> = {
+  log: '仅记录',
+  captcha: '要求验证码',
+  manual_review: '人工复核',
+  reject: '拒绝',
+};
 
 export interface CredentialField {
   key: string;

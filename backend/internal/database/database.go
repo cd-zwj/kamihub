@@ -95,6 +95,14 @@ func Migrate(db *gorm.DB) error {
 		&models.WorkerTaskRun{},
 		&models.ReconcileDiff{},
 		&models.Notification{},
+
+		// ---------- 迭代 2：安全加固 ----------
+		// 恢复码是新表；users 上的 totp_* 是新增列（带默认值，历史用户不受影响）。
+		// risk_rules / risk_hits / blacklist 全部是新表。
+		&models.UserRecoveryCode{},
+		&models.RiskRule{},
+		&models.RiskHit{},
+		&models.Blacklist{},
 	)
 }
 

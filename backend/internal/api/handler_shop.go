@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -24,14 +25,50 @@ type shopRegisterReq struct {
 	Username string `json:"username" binding:"required"`
 	Email    string `json:"email"`
 	Password string `json:"password" binding:"required"`
+	// 验证码（强制）。注册是黑产最常刷的入口：批量开号 → 刷优惠/套佣金/洗钱。
+	CaptchaID     string `json:"captcha_id"`
+	CaptchaAnswer string `json:"captcha_answer"`
 }
 
 // shopRegister 买家注册
+//
+// 三道闸门，顺序故意如此：
+//  1. 验证码 —— 先挡掉「连题目都答不出来的脚本」，成本最低
+//  2. 风控   —— 挡「能答题但行为异常」的（同 IP 批量注册）
+//  3. 建号   —— 最后才动数据库
+//
+// 把风控放在建号之前，是为了让「被拒的注册」不留下任何账号痕迹，
+// 否则黑产可以靠「注册失败但账号已存在」探测规则。
 func (h *Handlers) shopRegister(c *gin.Context) {
 	var req shopRegisterReq
 	if !BindJSON(c, &req) {
 		return
 	}
+
+	// ---- 1. 验证码 ----
+	if !h.captchaCheck(c, req.CaptchaID, req.CaptchaAnswer) {
+		return
+	}
+
+	// ---- 2. 风控 ----
+	if h.risk != nil {
+		decision, rerr := h.risk.Evaluate(c.Request.Context(), service.EvalInput{
+			Scene: models.SceneRegister,
+			IP:    c.ClientIP(),
+			Email: strings.TrimSpace(strings.ToLower(req.Email)),
+		})
+		if rerr != nil {
+			// 风控异常已内部降级放行；这里只记日志，不阻断注册
+			slog.Error("注册风控评估异常", "error", rerr.Error())
+		}
+		if !decision.Allowed() {
+			h.auditLog(c, "shop.register_blocked", "buyer", req.Username,
+				gin.H{"reason": "risk_reject", "rules": hitCodes(decision)})
+			Fail(c, 403, "RISK_REJECTED", "当前环境存在异常，注册未通过校验；如有疑问请联系客服")
+			return
+		}
+	}
+
 	buyer, err := h.buyerAuth.Register(c.Request.Context(), service.BuyerRegisterInput{
 		Username: req.Username,
 		Email:    req.Email,
@@ -61,9 +98,21 @@ func (h *Handlers) shopRegister(c *gin.Context) {
 	})
 }
 
+// hitCodes 把命中的规则编码拼成一行，写进审计便于事后追因
+func hitCodes(d service.Decision) string {
+	codes := make([]string, 0, len(d.Hits))
+	for _, h := range d.Hits {
+		codes = append(codes, h.RuleCode)
+	}
+	return strings.Join(codes, ",")
+}
+
 type shopLoginReq struct {
 	Username string `json:"username" binding:"required"`
 	Password string `json:"password" binding:"required"`
+	// 验证码：仅在该 ip+用户名 已经失败过至少一次时才必填
+	CaptchaID     string `json:"captcha_id"`
+	CaptchaAnswer string `json:"captcha_answer"`
 }
 
 // shopLogin 买家登录
@@ -92,11 +141,24 @@ func (h *Handlers) shopLogin(c *gin.Context) {
 		return
 	}
 
+	// 失败过一次之后才要求验证码（04 §3.3）。
+	//
+	// 为什么不总是要求：登录页是转化漏斗最窄的地方，每次都要做题会赶走真买家。
+	// 只在「已经错过一次」时才加码 —— 真买家最多被多问一次，
+	// 而脚本必须每次都准备解题逻辑。
+	if h.captcha != nil && !h.cache.AllowN(ctx, limKey+":needcaptcha", 1) {
+		if !h.captchaCheck(c, req.CaptchaID, req.CaptchaAnswer) {
+			return
+		}
+	}
+
 	issued, buyer, err := h.buyerAuth.BuyerLogin(ctx, req.Username, req.Password, ip)
 	if err != nil {
 		// 只有失败才消耗配额
 		h.cache.Fail(ctx, limKey, 15*time.Minute)
 		h.cache.Fail(ctx, ipKey, 15*time.Minute)
+		// 标记「下次这个 ip+用户名 要验证码」
+		h.cache.Fail(ctx, limKey+":needcaptcha", 15*time.Minute)
 		switch {
 		case errors.Is(err, service.ErrBuyerInvalidCredentials):
 			Unauthorized(c, "用户名或密码错误")
@@ -293,6 +355,37 @@ func (h *Handlers) shopPurchase(c *gin.Context) {
 		"shop:order:"+itoa(int64(buyer.ID)), 30, 60*1e9) {
 		Fail(c, 429, "TOO_MANY_REQUESTS", "下单过于频繁，请稍后再试")
 		return
+	}
+
+	// ---- 风控：在动钱之前评估 ----
+	//
+	// 为什么放在这里而不是 ShopOrderService 内部：
+	// 这里能拿到金额（BuyerQuote 与真正下单用的是同一个函数，结果一致），
+	// 又不用改动生产验证过的结算链路 —— 风控出问题不会连累下单。
+	if h.risk != nil {
+		amount := 0.0
+		if row, total, qerr := h.listings.BuyerQuote(c.Request.Context(), req.ListingID, req.Quantity); qerr == nil && row != nil {
+			amount = total.InexactFloat64()
+		}
+		decision, rerr := h.risk.Evaluate(c.Request.Context(), service.EvalInput{
+			Scene:   models.SceneOrder,
+			IP:      c.ClientIP(),
+			BuyerID: buyer.ID,
+			Email:   buyer.Email,
+			Amount:  amount,
+		})
+		if rerr != nil {
+			slog.Error("下单风控评估异常", "error", rerr.Error())
+		}
+		if !decision.Allowed() {
+			h.auditLog(c, "shop.order_blocked", "buyer", buyer.Username,
+				gin.H{"reason": "risk_reject", "rules": hitCodes(decision)})
+			Fail(c, 403, "RISK_REJECTED", "该笔订单未通过风控校验；如有疑问请联系客服")
+			return
+		}
+		// review 不拦单：标记进人工队列即可。
+		// 让买家无感是刻意的 —— 拦下来只会把可疑用户赶走，
+		// 而放行后我们仍然有完整命中记录可以复查。
 	}
 
 	res, err := h.shopOrders.Purchase(c.Request.Context(), service.ShopPurchaseInput{

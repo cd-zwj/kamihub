@@ -44,6 +44,11 @@ type Handlers struct {
 	reconcile *service.ReconcileService
 	notifier  *notify.Notifier
 	worker    *worker.Runner
+
+	// ---------- 迭代 2：安全加固 ----------
+	totp   *service.TOTPService
+	captcha *service.CaptchaService
+	risk    *service.RiskService
 }
 
 // Deps 构造依赖
@@ -73,6 +78,11 @@ type Deps struct {
 	Reconcile    *service.ReconcileService
 	Notify       *notify.Notifier
 	WorkerRunner *worker.Runner
+
+	// ---------- 迭代 2：安全加固 ----------
+	TOTP    *service.TOTPService
+	Captcha *service.CaptchaService
+	Risk    *service.RiskService
 }
 
 func NewHandlers(d Deps) *Handlers {
@@ -87,6 +97,8 @@ func NewHandlers(d Deps) *Handlers {
 		payment: d.Payment,
 
 		reconcile: d.Reconcile, notifier: d.Notify, worker: d.WorkerRunner,
+
+		totp: d.TOTP, captcha: d.Captcha, risk: d.Risk,
 	}
 }
 
@@ -116,6 +128,11 @@ func (h *Handlers) Register(r *gin.Engine) {
 
 	// ---------- 公开接口 ----------
 	api.POST("/auth/login", h.login)
+	// 二次验证第二步：用临时票据 + 动态码/恢复码换真令牌。
+	// 必须公开 —— 此时调用方只有一枚 totp 票据，还没有任何可用权限。
+	api.POST("/auth/totp", h.loginTOTP)
+	// 验证码下发（公开）：注册页、查单页在未登录时就要用
+	api.GET("/captcha", h.getCaptcha)
 
 	// ================================================================
 	// C 端购买平台（/api/shop）
@@ -170,6 +187,15 @@ func (h *Handlers) Register(r *gin.Engine) {
 		authed.GET("/auth/me", h.me)
 		authed.POST("/auth/logout", h.logout)
 		authed.POST("/auth/password", h.changePassword)
+
+		// ---------- 迭代 2：两步验证（自己管自己）----------
+		// 都在 authed 而不是 admin：operator 也应该被允许自己绑 2FA
+		authed.GET("/auth/totp/status", h.totpStatus)
+		authed.POST("/auth/totp/setup", h.totpSetup)
+		authed.POST("/auth/totp/confirm", h.totpConfirm)
+		authed.POST("/auth/totp/disable", h.totpDisable)
+		authed.POST("/auth/totp/recovery-codes", h.totpRecoveryCodes)
+
 		authed.GET("/dashboard/stats", h.dashboardStats)
 
 		authed.GET("/strategies", h.listStrategies)
@@ -297,6 +323,23 @@ func (h *Handlers) Register(r *gin.Engine) {
 		// 通知渠道状态与测试
 		admin.GET("/notify/status", h.notifyStatus)
 		admin.POST("/notify/test", h.testNotify)
+
+		// ---------- 迭代 2：安全加固 ----------
+		// 强制重置他人的 2FA（手机丢了 + 恢复码也没了的兜底手段）
+		admin.POST("/users/:id/totp/reset", h.totpReset)
+
+		// 风控规则：可热改（改完立刻生效，不用重启）
+		admin.GET("/risk/rules", h.listRiskRules)
+		admin.PUT("/risk/rules/:id", h.updateRiskRule)
+
+		// 风控命中记录：人工复核队列 + 按主体追溯
+		admin.GET("/risk/hits", h.listRiskHits)
+		admin.POST("/risk/hits/:id/review", h.reviewRiskHit)
+
+		// 黑名单
+		admin.GET("/blacklist", h.listBlacklist)
+		admin.POST("/blacklist", h.createBlacklist)
+		admin.DELETE("/blacklist/:id", h.deleteBlacklist)
 	}
 
 	r.NoRoute(func(c *gin.Context) {

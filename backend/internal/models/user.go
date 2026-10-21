@@ -26,8 +26,24 @@ type User struct {
 	Remark       string     `gorm:"size:255" json:"remark"`
 	LastLoginAt  *time.Time `json:"last_login_at"`
 	LastLoginIP  string     `gorm:"size:64" json:"last_login_ip"`
-	CreatedAt    time.Time  `json:"created_at"`
-	UpdatedAt    time.Time  `json:"updated_at"`
+
+	// ---------- TOTP 两步验证 ----------
+
+	// TOTPSecret 加密后的 TOTP 密钥（AES-256-GCM）。
+	//
+	// 为什么要加密：这个密钥等价于「第二因素的全部秘密」。
+	// 库被拖走但密钥没泄露 → 攻击者仍然算不出验证码；
+	// 明文存库则等于 2FA 完全失效。
+	//
+	// json:"-" 保证它永远不会出现在任何 API 响应里。
+	TOTPSecret string `gorm:"size:255" json:"-"`
+	// TOTPEnabled 是否已完成绑定（只有确认过一次正确验证码才置 true）
+	TOTPEnabled bool `gorm:"not null;default:false" json:"totp_enabled"`
+	// TOTPBoundAt 绑定完成时间
+	TOTPBoundAt *time.Time `json:"totp_bound_at"`
+
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 func (User) TableName() string { return "users" }
