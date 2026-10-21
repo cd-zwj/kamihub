@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+﻿import { useCallback, useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
   Alert, Button, Card, Checkbox, Descriptions, Drawer, Form, Input, InputNumber, Modal, Radio, Select,
@@ -12,6 +12,7 @@ import {
 } from '@/api/types';
 import { copyText, fmtTime, money, newRequestId, untilText, yuan } from '@/utils/format';
 import { useAuth } from '@/auth/AuthContext';
+import { useDrawerWidth } from '@/hooks/useIsMobile';
 
 /**
  * 订单生命周期时间线（迭代 4 · U7）。
@@ -148,6 +149,8 @@ function OrderTimeline({ order, attempts }: { order: Order; attempts: OrderAttem
 }
 
 export default function Orders() {
+  // 抽屉宽度：手机满屏、桌面固定宽（移动端适配）
+  const drawerWidth = useDrawerWidth(720);
   const { isAdmin } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
 
@@ -481,7 +484,7 @@ export default function Orders() {
           setDetail(null);
           setAttempts([]);
         }}
-        width={720}
+        width={drawerWidth}
         loading={detailLoading}
       >
         {detail && (

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 
 	"kamihub/internal/cache"
 	"kamihub/internal/models"
+	"kamihub/internal/notify"
 )
 
 // 规则编码。和 models.RiskRule.Code 一一对应，也是 risk_hits 里的 rule_code。
@@ -80,6 +82,10 @@ func (in EvalInput) Subject() string {
 type RiskService struct {
 	db    *gorm.DB
 	cache *cache.Client
+	// notifier 风控命中告警。为 nil 时只记录不告警（不影响拦截逻辑）。
+	// 用 setter 注入而不是构造参数：风控的核心职责是「判不判」，
+	// 告警是附加能力，缺了它风控照样能工作。
+	notifier *notify.Notifier
 
 	mu sync.RWMutex
 	// rules 按场景缓存的启用规则，避免每次下单都查一遍表
@@ -98,6 +104,18 @@ const riskCacheTTL = 10 * time.Second
 
 func NewRiskService(db *gorm.DB, c *cache.Client) *RiskService {
 	return &RiskService{db: db, cache: c}
+}
+
+// WithNotifier 注入告警渠道（迭代 2 遗留项：命中接通知）。
+//
+// 只对 reject 级命中告警，且靠 notify 的事件聚合窗口去重 ——
+// 风控命中在高峰期可能每分钟几十条，不聚合会直接把 Telegram 刷爆，
+// 然后运维把告警关掉，等于白做。review 级连告警都不发：
+// 「有人被标记复核」不值得打扰，但「有人被真的拦下来」必须知道 ——
+// 那可能是黑产在试，也可能是我们自己规则配错在拦正常客户。
+func (s *RiskService) WithNotifier(n *notify.Notifier) *RiskService {
+	s.notifier = n
+	return s
 }
 
 // Invalidate 规则被改动后清缓存，让下一次评估立刻用新配置（热改不重启）。
@@ -213,7 +231,76 @@ func (s *RiskService) Evaluate(ctx context.Context, in EvalInput) (Decision, err
 			slog.Error("写入风控命中记录失败", "error", err.Error())
 		}
 	}
+
+	// 只有 reject 才告警（review 只落库）。
+	// 告警本身走 notify 的事件聚合窗口，所以同一规则 5 分钟内只推一次。
+	if d.Level == models.LevelReject {
+		s.alertRejected(ctx, in, d)
+	}
+
 	return d, nil
+}
+
+// alertRejected 把一次 reject 命中推给运维。
+//
+// 为什么值得告警：风控「默默拦了一堆人」是最危险的状态 ——
+// 要么是黑产在试（该知道），要么是我们规则配错在拦正常客户（更该知道）。
+// 两种都必须有人看见。
+func (s *RiskService) alertRejected(ctx context.Context, in EvalInput, d Decision) {
+	if s.notifier == nil {
+		return
+	}
+	codes := make([]string, 0, len(d.Hits))
+	for _, h := range d.Hits {
+		if h.Level == models.LevelReject {
+			codes = append(codes, h.RuleCode)
+		}
+	}
+	if len(codes) == 0 {
+		codes = append(codes, "unknown")
+	}
+
+	fields := map[string]any{
+		"scene":   in.Scene,
+		"subject": in.Subject(),
+		"ip":      in.IP,
+		"rules":   strings.Join(codes, ","),
+	}
+	if in.Amount > 0 {
+		fields["amount"] = round2(in.Amount)
+	}
+	if in.BuyerID > 0 {
+		fields["buyer_id"] = in.BuyerID
+	}
+
+	s.notifier.Alert(ctx, notify.Message{
+		Level: notify.LevelWarn,
+		Event: notify.EventRiskRejected,
+		Title: fmt.Sprintf("风控拦截了一次%s", sceneText(in.Scene)),
+		Content: fmt.Sprintf("主体 %s（IP %s）触发规则 %s",
+			in.Subject(), in.IP, strings.Join(codes, "、")),
+		// 跳转到「风险命中」页，方便立刻复核
+		Link:   "/admin/security",
+		Fields: fields,
+	})
+}
+
+// sceneText 场景的中文名，用于告警文案
+func sceneText(scene string) string {
+	switch scene {
+	case models.SceneRegister:
+		return "注册"
+	case models.SceneLogin:
+		return "登录"
+	case models.SceneOrder:
+		return "下单"
+	case models.SceneWithdraw:
+		return "提现"
+	case models.SceneCommission:
+		return "分销佣金"
+	default:
+		return scene
+	}
 }
 
 // actionOf 把判定级别映射成建议动作

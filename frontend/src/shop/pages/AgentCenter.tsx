@@ -22,6 +22,7 @@ import { shopApi } from '@/shop/api/shopClient';
 import type { AgentOverview, AgentPriceRow, AgentTrendPoint, PriceTier } from '@/shop/api/shopClient';
 import { useShopAuth } from '@/shop/auth/ShopAuthContext';
 import { formatMoney } from '@/shop/layout/ShopLayout';
+import Sparkline from '@/components/Sparkline';
 
 const { Title, Text, Paragraph } = Typography;
 
@@ -335,7 +336,38 @@ export default function AgentCenter() {
                 <Paragraph type="secondary" style={{ fontSize: 13 }}>
                   统计口径：近 30 天内已发货订单。退款/失败订单不计入。
                 </Paragraph>
-                <Table scroll={{ x: 'max-content' }}
+
+                {/* 折线图看趋势，下面表格看明细。
+                    图用零依赖的内联 SVG（Sparkline），不引 recharts ——
+                    否则会把 recharts 重新拉回主包，Dashboard 的拆包就白做了。 */}
+                {trend.length > 0 ? (
+                  <div style={{ marginBottom: 16 }}>
+                    <Text strong style={{ fontSize: 13 }}>
+                      近 14 天订单量
+                    </Text>
+                    <Sparkline
+                      data={trend.map((t) => ({ label: t.day.slice(5), value: t.orders }))}
+                      height={110}
+                      dots={trend.length <= 20}
+                    />
+                    <div style={{ marginTop: 12 }}>
+                      <Text strong style={{ fontSize: 13 }}>
+                        近 14 天金额
+                      </Text>
+                      <Sparkline
+                        data={trend.map((t) => ({ label: t.day.slice(5), value: Number(t.amount) }))}
+                        height={90}
+                        color="#22c55e"
+                        dots={trend.length <= 20}
+                      />
+                    </div>
+                  </div>
+                ) : (
+                  <Empty description="近 14 天暂无销量" style={{ marginBottom: 16 }} />
+                )}
+
+                <Table
+                  scroll={{ x: 'max-content' }}
                   rowKey="day"
                   size="small"
                   dataSource={trend}

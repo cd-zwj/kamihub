@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+﻿import { useCallback, useEffect, useState } from 'react';
 import {
   Checkbox,
   Alert, Button, Card, Drawer, Form, Input, InputNumber, Modal, Popconfirm, Select,
@@ -14,6 +14,7 @@ import {
 } from '@/api/types';
 import { fmtTime, money, yuan } from '@/utils/format';
 import { useAuth } from '@/auth/AuthContext';
+import { useDrawerWidth } from '@/hooks/useIsMobile';
 import CardPoolDrawer from '@/components/CardPoolDrawer';
 import ImageUploader from '@/components/ImageUploader';
 import GoodsWizard from '@/components/GoodsWizard';
@@ -24,6 +25,8 @@ const STOCK_MODE_LOCAL = 2;
 const STOCK_MODE_HYBRID = 3;
 
 export default function GoodsPage() {
+  // 抽屉宽度：手机满屏、桌面固定宽（移动端适配）
+  const drawerWidth = useDrawerWidth(860);
   const { isAdmin } = useAuth();
   const [rows, setRows] = useState<Goods[]>([]);
   const [total, setTotal] = useState(0);
@@ -921,7 +924,7 @@ export default function GoodsPage() {
         title={supplyGoods ? `货源管理 · ${supplyGoods.name}` : '货源管理'}
         open={Boolean(supplyGoods)}
         onClose={() => setSupplyGoods(null)}
-        width={860}
+        width={drawerWidth}
         extra={
           isAdmin && (
             <Space>

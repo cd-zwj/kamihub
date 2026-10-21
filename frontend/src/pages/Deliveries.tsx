@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+﻿import { useCallback, useEffect, useState } from 'react';
 import {
   Alert, Button, Card, Descriptions, Drawer, Form, Input, InputNumber, Modal, Popconfirm,
   Select, Space, Table, Tag, Tooltip, Typography, message,
@@ -8,8 +8,11 @@ import { api, toastError } from '@/api/client';
 import type { Delivery, DeliveryView } from '@/api/types';
 import { copyText, fmtTime, untilText } from '@/utils/format';
 import { useAuth } from '@/auth/AuthContext';
+import { useDrawerWidth } from '@/hooks/useIsMobile';
 
 export default function Deliveries() {
+  // 抽屉宽度：手机满屏、桌面固定宽（移动端适配）
+  const drawerWidth = useDrawerWidth(640);
   const { isAdmin } = useAuth();
   const [rows, setRows] = useState<Delivery[]>([]);
   const [total, setTotal] = useState(0);
@@ -219,7 +222,7 @@ export default function Deliveries() {
         title="提货链接详情"
         open={Boolean(detail)}
         onClose={() => setDetail(null)}
-        width={640}
+        width={drawerWidth}
       >
         {detail && (
           <>

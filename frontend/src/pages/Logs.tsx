@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useState } from 'react';
+﻿import { useCallback, useEffect, useState } from 'react';
 import { Alert, Button, Card, Drawer, message, Popconfirm, Select, Space, Switch, Table, Tabs, Tag, Typography } from 'antd';
 import { ReloadOutlined } from '@ant-design/icons';
 import { api, toastError } from '@/api/client';
+import { useDrawerWidth } from '@/hooks/useIsMobile';
 import type { AuditLog, CallLog, Notification, Platform, ReconcileDiff, WorkerTask } from '@/api/types';
 import { LEVEL_COLOR, reconcileKindText, taskText } from '@/api/types';
 import { fmtTime } from '@/utils/format';
@@ -35,6 +36,8 @@ const ACTION_TEXT: Record<string, string> = {
 };
 
 export default function Logs() {
+  // 抽屉宽度：手机满屏、桌面固定宽（移动端适配）
+  const drawerWidth = useDrawerWidth(680);
   const [tab, setTab] = useState('call');
 
   const [callRows, setCallRows] = useState<CallLog[]>([]);
@@ -575,7 +578,7 @@ export default function Logs() {
         />
       </Card>
 
-      <Drawer title="调用详情" open={Boolean(callDetail)} onClose={() => setCallDetail(null)} width={680}>
+      <Drawer title="调用详情" open={Boolean(callDetail)} onClose={() => setCallDetail(null)} width={drawerWidth}>
         {callDetail && (
           <Space direction="vertical" size={14} style={{ width: '100%' }}>
             <div>

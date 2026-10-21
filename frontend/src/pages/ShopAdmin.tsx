@@ -43,6 +43,7 @@ import { api } from '@/api/client';
 import { toastError } from '@/api/client';
 import type { Goods } from '@/api/types';
 import ImageUploader from '@/components/ImageUploader';
+import { useDrawerWidth } from '@/hooks/useIsMobile';
 import { agoText, fmtTime } from '@/utils/format';
 
 const { Text, Title } = Typography;
@@ -175,6 +176,7 @@ function OverviewTab() {
 // ================================================================
 
 function BuyersTab() {
+  const drawerWidth = useDrawerWidth(640);
   const [rows, setRows] = useState<AdminBuyer[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -329,7 +331,7 @@ function BuyersTab() {
 
       <Drawer
         title={detail ? `买家详情 · ${detail.username}` : '买家详情'}
-        width={640}
+        width={drawerWidth}
         open={!!detail && !adjustOpen}
         onClose={() => setDetail(null)}
       >
@@ -453,6 +455,7 @@ interface ListingFormValues {
 }
 
 function ListingsTab() {
+  const drawerWidth = useDrawerWidth(640);
   const [rows, setRows] = useState<AdminListing[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -703,7 +706,7 @@ function ListingsTab() {
         open={editOpen}
         onCancel={() => setEditOpen(false)}
         onOk={() => form.submit()}
-        width={640}
+        width={drawerWidth}
         okText="保存"
       >
         <Form form={form} layout="vertical" onFinish={submit}>

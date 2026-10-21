@@ -232,13 +232,13 @@ func (n *Notifier) writeInbox(ctx context.Context, buyerID *uint, msg Message, c
 		chJSON, _ = json.Marshal(channels)
 	}
 	row := models.Notification{
-		BuyerID:  buyerID,
-		Level:    string(msg.Level),
-		Event:    msg.Event,
-		Title:    msg.Title,
-		Content:  msg.Content,
-		Link:     msg.Link,
-		Channels: chJSON,
+		BuyerID:   buyerID,
+		Level:     string(msg.Level),
+		Event:     msg.Event,
+		Title:     msg.Title,
+		Content:   msg.Content,
+		Link:      msg.Link,
+		Channels:  chJSON,
 		CreatedAt: msg.At,
 	}
 	if err := n.db.WithContext(ctx).Create(&row).Error; err != nil {
@@ -250,15 +250,21 @@ func (n *Notifier) writeInbox(ctx context.Context, buyerID *uint, msg Message, c
 
 // 运维告警事件
 const (
-	EventBalanceLow       = "balance.low"
-	EventPlatformDown     = "platform.down"
-	EventSupplyOutOfStock = "supply.out_of_stock"
-	EventSupplyCheckFail  = "supply.check_failed"
-	EventOrderStale       = "order.stale"
-	EventOrderFailRate    = "order.fail_rate"
-	EventReconcileDiff    = "reconcile.diff"
-	EventWorkerFailed     = "worker.task_failed"
+	EventBalanceLow        = "balance.low"
+	EventPlatformDown      = "platform.down"
+	EventSupplyOutOfStock  = "supply.out_of_stock"
+	EventSupplyCheckFail   = "supply.check_failed"
+	EventOrderStale        = "order.stale"
+	EventOrderFailRate     = "order.fail_rate"
+	EventReconcileDiff     = "reconcile.diff"
+	EventWorkerFailed      = "worker.task_failed"
 	EventPaymentNotifyMiss = "payment.notify_miss"
+	// EventRiskRejected 风控拒绝了一次操作（下单/注册）。
+	//
+	// 只在 reject 级命中时发：review 级命中量天生更大，
+	// 「有人被标记复核」不值得打扰，但「有人被真的拦下来」必须知道 ——
+	// 那可能是黑产在试，也可能是我们自己规则配错了在拦正常客户。
+	EventRiskRejected = "risk.rejected"
 )
 
 // 买家通知事件

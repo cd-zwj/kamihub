@@ -285,7 +285,9 @@ func bootstrap(cfg *config.Config) (*deps, error) {
 	// ---------- 迭代 2：安全加固 ----------
 	totpSvc := service.NewTOTPService(db, cfg, c)
 	captchaSvc := service.NewCaptchaService(c)
-	riskSvc := service.NewRiskService(db, c)
+	// 注入 notifier：reject 级命中会推告警（review 只落库不打扰）。
+	// 告警自身走 notify 的聚合窗口，同一规则 5 分钟内只推一次。
+	riskSvc := service.NewRiskService(db, c).WithNotifier(notifier)
 	// 播种出厂风控规则（幂等，绝不覆盖运营已调过的阈值）
 	if err := riskSvc.SeedDefaultRules(context.Background()); err != nil {
 		slog.Error("播种默认风控规则失败", "error", err.Error())

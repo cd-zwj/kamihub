@@ -1,9 +1,12 @@
-﻿import { Navigate, Route, Routes } from 'react-router-dom';
+﻿import { Suspense, lazy } from 'react';
+import { Navigate, Route, Routes } from 'react-router-dom';
 import { Spin } from 'antd';
 import { useAuth } from '@/auth/AuthContext';
 import AppLayout from '@/layout/AppLayout';
 import Login from '@/pages/Login';
-import Dashboard from '@/pages/Dashboard';
+// Dashboard 是唯一引入 recharts 的页面（+130KB gzip）。用 lazy 拆成独立 chunk：
+// 首屏只加载登录页与布局，图表包在真正进入概览时才下载。
+const Dashboard = lazy(() => import('@/pages/Dashboard'));
 import Platforms from '@/pages/Platforms';
 import UpstreamGoods from '@/pages/UpstreamGoods';
 import Goods from '@/pages/Goods';
@@ -55,7 +58,7 @@ export default function AdminApp() {
     <Routes>
       <Route path="/admin/login" element={<Navigate to="/admin" replace />} />
       <Route element={<AppLayout />}>
-        <Route path="/admin" element={<Dashboard />} />
+        <Route path="/admin" element={<Suspense fallback={<FullScreenSpin />}><Dashboard /></Suspense>} />
         <Route path="/admin/orders" element={<Orders />} />
         <Route path="/admin/deliveries" element={<Deliveries />} />
         <Route path="/admin/upstream" element={<UpstreamGoods />} />
