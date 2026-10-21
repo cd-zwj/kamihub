@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/joho/godotenv"
+
+	"kamihub/internal/pkg/crypto"
 )
 
 type Config struct {
@@ -157,8 +159,26 @@ type JWT struct {
 }
 
 type Crypto struct {
-	// 用于加密平台凭证（AES-256-GCM）。缺失时启动会直接报错。
+	// 用于加密平台凭证与用户 TOTP 密钥（AES-256-GCM）。缺失时启动会直接报错。
+	//
+	// 这是「主密钥」：所有新写入的密文都用它加密。
 	Key string
+	// OldKeys 是历史主密钥，**只用于解密**，构成轮换过渡窗口。
+	//
+	// 来源 ENCRYPTION_KEY_OLD，多个用英文逗号分隔。平时为空。
+	// 轮换步骤见 docs/roadmap/17-密钥轮换预案.md：
+	//   1. 新密钥写进 ENCRYPTION_KEY，旧密钥挪到 ENCRYPTION_KEY_OLD，重启
+	//   2. 跑 keytool -mode rotate 把全部历史密文重新加密
+	//   3. 确认 keytool -mode status 显示 0 条待轮换后，清空 ENCRYPTION_KEY_OLD
+	OldKeys []string
+}
+
+// Keyring 按当前配置构造密钥环：Key 作为主密钥，OldKeys 只用于解密。
+//
+// 全进程应该只构造一次并共享（服务之间共享同一把 keyring 才能保证
+// 加密/解密行为一致）。
+func (c Crypto) Keyring() (*crypto.Keyring, error) {
+	return crypto.NewKeyring(c.Key, c.OldKeys...)
 }
 
 type Delivery struct {
@@ -247,7 +267,8 @@ func Load() (*Config, error) {
 			TTL:    envDuration("JWT_TTL", 12*time.Hour),
 		},
 		Crypto: Crypto{
-			Key: env("ENCRYPTION_KEY", ""),
+			Key:     env("ENCRYPTION_KEY", ""),
+			OldKeys: envList("ENCRYPTION_KEY_OLD", ","),
 		},
 		Delivery: Delivery{
 			DefaultTTL: envDuration("DELIVERY_DEFAULT_TTL", 7*24*time.Hour),
@@ -313,6 +334,14 @@ func (c *Config) validate() error {
 		problems = append(problems, "ENCRYPTION_KEY 不能为空（用于加密平台凭证，生成方式：openssl rand -hex 32）")
 	} else if len(c.Crypto.Key) < 32 {
 		problems = append(problems, fmt.Sprintf("ENCRYPTION_KEY 至少 32 位，当前 %d 位", len(c.Crypto.Key)))
+	}
+	for i, old := range c.Crypto.OldKeys {
+		if len(old) < 32 {
+			problems = append(problems, fmt.Sprintf("ENCRYPTION_KEY_OLD 第 %d 项至少 32 位，当前 %d 位", i+1, len(old)))
+		}
+		if old == c.Crypto.Key {
+			problems = append(problems, fmt.Sprintf("ENCRYPTION_KEY_OLD 第 %d 项与 ENCRYPTION_KEY 相同，请直接删掉这一项", i+1))
+		}
 	}
 
 	if c.Database.Password == "" {
@@ -439,4 +468,23 @@ func envFloat(key string, fallback float64) float64 {
 		return fallback
 	}
 	return v
+}
+
+// envList 读取逗号分隔的列表，自动去空白与空项。
+func envList(key, sep string) []string {
+	raw, ok := os.LookupEnv(key)
+	if !ok || strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	parts := strings.Split(raw, sep)
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if v := strings.TrimSpace(p); v != "" {
+			out = append(out, v)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }

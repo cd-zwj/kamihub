@@ -1,84 +1,43 @@
 // Package crypto 提供凭证加密、密码哈希与安全随机 token。
+//
+// 加密使用 AES-256-GCM。密钥通过 Keyring 管理（见 keyring.go），
+// 所以 ENCRYPTION_KEY 是可以安全更换的 —— 前提是按
+// docs/roadmap/17-密钥轮换预案.md 的步骤操作。
 package crypto
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"errors"
-	"fmt"
 	"io"
 
 	"golang.org/x/crypto/bcrypt"
 )
 
-// deriveKey 把任意长度的密钥材料派生为 32 字节 AES-256 密钥。
-// 若传入的是 64 位 hex 串，则直接解码使用，避免多一层无谓的哈希。
-func deriveKey(material string) ([]byte, error) {
-	if material == "" {
-		return nil, errors.New("加密密钥为空")
-	}
-	if len(material) == 64 {
-		if raw, err := hex.DecodeString(material); err == nil {
-			return raw, nil
-		}
-	}
-	sum := sha256.Sum256([]byte(material))
-	return sum[:], nil
-}
-
-// Encrypt 使用 AES-256-GCM 加密，返回 base64(nonce || ciphertext)。
+// Encrypt 用单把密钥加密（AES-256-GCM），输出带密钥标签的密文。
+//
+// Deprecated: 新代码请用 Keyring —— 单密钥接口无法参与密钥轮换。
+// 这里保留是因为它能保证「只有一把密钥」的调用点语义清晰。
 func Encrypt(plaintext, keyMaterial string) (string, error) {
-	key, err := deriveKey(keyMaterial)
+	ring, err := NewKeyring(keyMaterial)
 	if err != nil {
 		return "", err
 	}
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return "", err
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return "", err
-	}
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-		return "", err
-	}
-	sealed := gcm.Seal(nonce, nonce, []byte(plaintext), nil)
-	return base64.StdEncoding.EncodeToString(sealed), nil
+	return ring.Encrypt(plaintext)
 }
 
-// Decrypt 解密 Encrypt 的产物。
-func Decrypt(ciphertext, keyMaterial string) (string, error) {
-	key, err := deriveKey(keyMaterial)
+// Decrypt 依次尝试传入的密钥解密（第一个为主密钥）。
+//
+// Deprecated: 新代码请用 Keyring。
+func Decrypt(ciphertext string, keyMaterials ...string) (string, error) {
+	if len(keyMaterials) == 0 {
+		return "", errors.New("未提供解密密钥")
+	}
+	ring, err := NewKeyring(keyMaterials[0], keyMaterials[1:]...)
 	if err != nil {
 		return "", err
 	}
-	raw, err := base64.StdEncoding.DecodeString(ciphertext)
-	if err != nil {
-		return "", fmt.Errorf("密文不是合法 base64: %w", err)
-	}
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return "", err
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return "", err
-	}
-	nonceSize := gcm.NonceSize()
-	if len(raw) < nonceSize {
-		return "", errors.New("密文长度不足")
-	}
-	plain, err := gcm.Open(nil, raw[:nonceSize], raw[nonceSize:], nil)
-	if err != nil {
-		return "", fmt.Errorf("解密失败（ENCRYPTION_KEY 是否被改过？）: %w", err)
-	}
-	return string(plain), nil
+	return ring.Decrypt(ciphertext)
 }
 
 // HashPassword 生成 bcrypt 哈希。

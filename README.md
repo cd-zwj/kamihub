@@ -554,7 +554,11 @@ X-Content-Type-Options: nosniff
 | 资金安全 | 失败**关闭**（fail-closed）；可配每日消费上限；两阶段采购不重复扣款 |
 | 网络暴露 | 后端与 web 只绑回环；Postgres/Redis 不映射端口 |
 
-> ⚠️ `ENCRYPTION_KEY` 一旦设定**不要再改**：改了会导致已保存的平台凭证全部无法解密，需要重新录入。
+> ⚠️ 换 `ENCRYPTION_KEY` **不是改个值就完事** —— 它加密了上游凭证和用户两步验证密钥，
+> 直接替换会让两者一起解不开（且服务启动时看不出来）。
+> 必须按 [`docs/roadmap/17-密钥轮换预案.md`](docs/roadmap/17-密钥轮换预案.md) 走
+> 「配双密钥 → `keytool -mode rotate` → 清旧密钥」三步。
+> **首次部署当天就把这个 key 备份到离线位置** —— 备份比轮换更救命。
 
 ---
 
@@ -567,7 +571,8 @@ X-Content-Type-Options: nosniff
 | `APP_BASE_URL` | ✅ | — | 提货链接前缀，必须是买家能访问的地址 |
 | `DB_USER` / `DB_PASSWORD` / `DB_NAME` | ✅ | `kamihub` / — / `kamihub` | PostgreSQL 连接 |
 | `JWT_SECRET` | ✅ | — | `openssl rand -hex 32`，签发登录令牌 |
-| `ENCRYPTION_KEY` | ✅ | — | `openssl rand -hex 32`，加密平台凭证（**勿改**） |
+| `ENCRYPTION_KEY` | ✅ | — | `openssl rand -hex 32`，加密平台凭证与 TOTP 密钥（**更换须走 `17` 号文档的轮换流程**） |
+| `ENCRYPTION_KEY_OLD` | ❌ | — | 历史密钥，仅轮换窗口期填写，多个逗号分隔 |
 | `JWT_TTL` | | `12h` | 登录令牌有效期 |
 | `DEFAULT_ADMIN_USERNAME` / `DEFAULT_ADMIN_PASSWORD` | | `admin` / 自动生成 | 初始管理员；密码留空则首次启动生成并打印到日志 |
 | `DELIVERY_DEFAULT_TTL` | | `168h` | 提货链接默认有效期 |
@@ -713,7 +718,7 @@ cd frontend && npm run typecheck && npm run build
 | 页面能打开但所有请求 404 | Nginx 没把 `/api/` 转发到后端。检查 `deploy/nginx-web.conf` 是否被打进镜像（改完要 `docker compose up -d --build web`） |
 | Nginx 报 `no resolver defined to resolve backend` | `proxy_pass` 用了变量却没声明 `resolver`。已在 `nginx-web.conf` 里配 `resolver 127.0.0.11`（Docker 内嵌 DNS） |
 | 页面中文乱码 | Nginx 未声明 `charset utf-8`。已在 `nginx-web.conf` 中显式设置 |
-| 平台凭证解密失败 | `ENCRYPTION_KEY` 被改过。改回原值，或删除平台后重新录入凭证 |
+| 平台凭证解密失败 | `ENCRYPTION_KEY` 被改过且未配 `ENCRYPTION_KEY_OLD`。按 `docs/roadmap/17-密钥轮换预案.md` §七 处理 |
 | 采购报「签名错误」 | `App ID` / `App Secret` 不对，或服务器时间偏差超过 300 秒（上游要求 ±300s，请校时 NTP） |
 | 建货源报 502 / `UPSTREAM_ERROR` | 上游校验没过（编号不存在 / 平台不可达 / 凭证失效）。核对上游编号，或临时传 `skip_verify: true` |
 | 建货源报 400「已配置过该货源」 | 同一商品在同一平台下重复绑定了同一个上游商品。检查该商品的货源列表 |

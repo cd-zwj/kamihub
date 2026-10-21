@@ -19,11 +19,12 @@ import (
 type PlatformService struct {
 	db       *gorm.DB
 	registry *platform.Registry
-	credKey  string
+	// keys 是共享密钥环：加密恒用主密钥，解密兼容历史密钥。
+	keys *crypto.Keyring
 }
 
-func NewPlatformService(db *gorm.DB, registry *platform.Registry, credKey string) *PlatformService {
-	return &PlatformService{db: db, registry: registry, credKey: credKey}
+func NewPlatformService(db *gorm.DB, registry *platform.Registry, keys *crypto.Keyring) *PlatformService {
+	return &PlatformService{db: db, registry: registry, keys: keys}
 }
 
 // Registry 暴露适配器注册表，供 handler 返回可用适配器列表
@@ -35,7 +36,7 @@ func (s *PlatformService) EncryptCredentials(creds map[string]string) (string, e
 	if err != nil {
 		return "", fmt.Errorf("凭证序列化失败: %w", err)
 	}
-	return crypto.Encrypt(string(raw), s.credKey)
+	return s.keys.Encrypt(string(raw))
 }
 
 // DecryptCredentials 还原明文凭证。仅在构造客户端时调用，绝不返回给前端。
@@ -43,7 +44,7 @@ func (s *PlatformService) DecryptCredentials(encrypted string) (map[string]strin
 	if encrypted == "" {
 		return map[string]string{}, nil
 	}
-	plain, err := crypto.Decrypt(encrypted, s.credKey)
+	plain, err := s.keys.Decrypt(encrypted)
 	if err != nil {
 		return nil, err
 	}

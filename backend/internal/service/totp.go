@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -51,10 +52,26 @@ type TOTPService struct {
 	db    *gorm.DB
 	cfg   *config.Config
 	cache *cache.Client
+
+	// 密钥环懒加载：构造一次复用，避免每次验码都重新派生密钥。
+	keyOnce sync.Once
+	keys    *crypto.Keyring
+	keyErr  error
 }
 
 func NewTOTPService(db *gorm.DB, cfg *config.Config, c *cache.Client) *TOTPService {
 	return &TOTPService{db: db, cfg: cfg, cache: c}
+}
+
+// keyring 返回共享密钥环（含历史密钥），供解密老密文。
+func (s *TOTPService) keyring() (*crypto.Keyring, error) {
+	s.keyOnce.Do(func() {
+		s.keys, s.keyErr = s.cfg.Crypto.Keyring()
+	})
+	if s.keyErr != nil {
+		return nil, s.keyErr
+	}
+	return s.keys, nil
 }
 
 // TOTPStatus 供前端决定 UI：未绑定、已绑定、恢复码剩几个
@@ -123,7 +140,11 @@ func (s *TOTPService) Setup(ctx context.Context, userID uint) (*SetupResult, err
 		return nil, fmt.Errorf("生成 TOTP 密钥失败: %w", err)
 	}
 
-	enc, err := crypto.Encrypt(key.Secret(), s.cfg.Crypto.Key)
+	ring, err := s.keyring()
+	if err != nil {
+		return nil, fmt.Errorf("初始化加密密钥失败: %w", err)
+	}
+	enc, err := ring.Encrypt(key.Secret())
 	if err != nil {
 		return nil, fmt.Errorf("加密 TOTP 密钥失败: %w", err)
 	}
@@ -162,9 +183,9 @@ func (s *TOTPService) Confirm(ctx context.Context, userID uint, code string) (*C
 		return nil, errors.New("请先获取密钥并添加到验证器，再输入验证码确认")
 	}
 
-	secret, err := crypto.Decrypt(user.TOTPSecret, s.cfg.Crypto.Key)
+	secret, err := s.decryptSecret(user.TOTPSecret)
 	if err != nil {
-		return nil, fmt.Errorf("解密 TOTP 密钥失败（ENCRYPTION_KEY 可能已变更）: %w", err)
+		return nil, err
 	}
 	if !s.verifyCode(secret, code) {
 		return nil, ErrTOTPCodeWrong
@@ -244,7 +265,7 @@ func (s *TOTPService) Verify(ctx context.Context, userID uint, code string) (use
 
 	// 先试动态码（99% 的情况），再试恢复码。
 	// 顺序不能反：恢复码是 10 个一组的 16 位串，先试它要多查一次库。
-	secret, derr := crypto.Decrypt(user.TOTPSecret, s.cfg.Crypto.Key)
+	secret, derr := s.decryptSecret(user.TOTPSecret)
 	if derr == nil && s.verifyCode(secret, code) {
 		return false, nil
 	}
@@ -253,6 +274,21 @@ func (s *TOTPService) Verify(ctx context.Context, userID uint, code string) (use
 		return true, nil
 	}
 	return false, ErrTOTPCodeWrong
+}
+
+// decryptSecret 解出用户的 TOTP 明文密钥。
+//
+// 错误信息刻意点明 ENCRYPTION_KEY：这是运维最容易踩、也最难自查的坑。
+func (s *TOTPService) decryptSecret(encrypted string) (string, error) {
+	ring, err := s.keyring()
+	if err != nil {
+		return "", fmt.Errorf("初始化加密密钥失败: %w", err)
+	}
+	secret, err := ring.Decrypt(encrypted)
+	if err != nil {
+		return "", fmt.Errorf("解密 TOTP 密钥失败（ENCRYPTION_KEY 可能已变更）: %w", err)
+	}
+	return secret, nil
 }
 
 // verifyCode 校验 6 位动态码

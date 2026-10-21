@@ -256,10 +256,23 @@ func bootstrap(cfg *config.Config) (*deps, error) {
 	// ---------- 通知 ----------
 	notifier := buildNotifier(db, cfg)
 
+	// ---------- 加密密钥环 ----------
+	// 主密钥加密所有新数据；ENCRYPTION_KEY_OLD 只用于解密历史数据。
+	// 必须全进程共享同一把 keyring，否则加密/解密行为会不一致。
+	keys, err := cfg.Crypto.Keyring()
+	if err != nil {
+		return nil, fmt.Errorf("初始化加密密钥环失败: %w", err)
+	}
+	slog.Info("加密密钥环就绪", "primary_key", keys.Tag(), "key_count", keys.KeyCount())
+	if keys.KeyCount() > 1 {
+		slog.Warn("检测到 ENCRYPTION_KEY_OLD：当前处于密钥轮换窗口，" +
+			"请跑 `keytool -mode rotate` 重新加密历史数据，完成后清空该环境变量")
+	}
+
 	// ---------- 服务组装 ----------
 	routes := routing.NewRegistry()
 	settings := service.NewSettingsService(db)
-	platforms := service.NewPlatformService(db, registry, cfg.Crypto.Key)
+	platforms := service.NewPlatformService(db, registry, keys)
 	// 卡密池：自建商品（不带上游货源）靠它本地发货
 	cards := service.NewCardService(db)
 	goods := service.NewGoodsService(db, platforms, cards, cfg.Upstream.VerifySupply)
