@@ -97,6 +97,52 @@ func Recovery() gin.HandlerFunc {
 	}
 }
 
+// AntiRed 防红：在微信 / QQ 内置浏览器里打开时给出提示页。
+//
+// 为什么卡密站需要这个：这类域名的落地页很容易被微信拦截，
+// 用户点进来看到的是微信的红色警告页（所以叫「防红」），
+// 而不是我们自己的错误提示 —— 用户会以为站点挂了或被骗了。
+// 主动识别 UA 并给一个「请用浏览器打开」的页面，转化损失最小。
+//
+// 对照 dujiaoka-next 的实现（DujiaoBoot 中间件里的 is_open_anti_red）：
+// 它在中间件里判断 UA 含 'QQ/' 或 'MicroMessenger' 就渲染提示视图。
+// 这里保留同样的判断，但做成：
+//   - 只在 enabled 时生效（默认关闭：这是新增行为，不能默认改变现状）
+//   - 只拦「页面跳转」类请求（Accept 含 text/html），不拦 API 的 XHR，
+//     否则前端发起的所有 JSON 请求都会拿到一段 HTML，页面直接崩
+func AntiRed(enabled func() bool, page string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if enabled == nil || !enabled() {
+			c.Next()
+			return
+		}
+		// 只拦浏览器导航；XHR/fetch 的 Accept 通常不含 text/html
+		if !strings.Contains(c.GetHeader("Accept"), "text/html") {
+			c.Next()
+			return
+		}
+		ua := c.GetHeader("User-Agent")
+		if !isWechatOrQQ(ua) {
+			c.Next()
+			return
+		}
+		// 提货页也要拦：被拦截时用户最需要的就是看到正确的提示
+		c.Header("Content-Type", "text/html; charset=utf-8")
+		c.Status(http.StatusOK)
+		_, _ = c.Writer.WriteString(page)
+		c.Abort()
+	}
+}
+
+// isWechatOrQQ 判断是否在微信/QQ 内置浏览器中。
+//
+// 微信的 UA 一定含 MicroMessenger；手机 QQ 含 ' QQ/'（前面有空格）
+// 或 'QQ/'。统一用不区分大小写的包含判断，避免漏掉各种魔改 UA。
+func isWechatOrQQ(ua string) bool {
+	low := strings.ToLower(ua)
+	return strings.Contains(low, "micromessenger") || strings.Contains(low, "qq/")
+}
+
 // CORS 允许前端独立域名访问。生产环境建议由 Nginx 同源反代，不依赖此中间件。
 func CORS(allowedOrigins []string) gin.HandlerFunc {
 	allowAll := len(allowedOrigins) == 0

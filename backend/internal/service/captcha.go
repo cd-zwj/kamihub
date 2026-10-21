@@ -49,13 +49,49 @@ const (
 //   - 一次性消费：答案用过即删，无法重放
 //   - 失败封禁：慢速爆破也会被 session 级封禁挡住
 //
-// 挡不住的场景交给风控规则（同 IP 注册频率等），两层配合。
+// # 关于 provider（对标 dujiaoka-next）
+//
+// 对照项目用的是「图片码（mews/captcha）+ GeeTest 极验滑块」双方案可切换，
+// 且都有 is_open_xxx 开关。它比纯算术题强的地方在于：
+// 极验的行为验证能挡住「看得懂算术题」的自动化（针对性脚本、人工打码平台）。
+//
+// 本项目把验证码做成可替换的 Provider，内置 arithmetic 一种：
+//
+//	arithmetic —— 零依赖、零成本、挡住 80% 脚本（当前默认）
+//	geetest    —— 行为验证，需要 geetest_id / geetest_key + 前端 SDK
+//	turnstile  —— Cloudflare 托管挑战，需要 site_key / secret_key
+//
+// 后两种**刻意没有实现**：它们都依赖第三方密钥与前端 SDK，
+// 在没有真实密钥的情况下写出来的只能是「看起来能跑但永远验不过」的假实现，
+// 比不写更糟（会让人误以为有防护）。接入点在 Provider 常量与
+// handler 的 challenge 响应结构里留好了，拿到密钥后按注释补一个分支即可。
 type CaptchaService struct {
 	cache *cache.Client
 }
 
+// 验证码实现标识
+const (
+	CaptchaProviderArithmetic = "arithmetic"
+)
+
 func NewCaptchaService(c *cache.Client) *CaptchaService {
 	return &CaptchaService{cache: c}
+}
+
+// Provider 当前生效的实现。目前只有内置算术题。
+//
+// 参数是运营在设置里选的 provider 名；不认识的值一律回落到 arithmetic ——
+// 配错 provider 时宁可退化到「较弱的防护」，也不能变成「没有防护」。
+func (s *CaptchaService) Provider(configured string) string {
+	switch configured {
+	case CaptchaProviderArithmetic, "":
+		return CaptchaProviderArithmetic
+	default:
+		// geetest / turnstile 尚未实现，回落并留痕，避免运营以为已经生效
+		slog.Warn("验证码 provider 尚未实现，回落到内置算术题",
+			"configured", configured, "fallback", CaptchaProviderArithmetic)
+		return CaptchaProviderArithmetic
+	}
 }
 
 // CaptchaChallenge 下发给前端的题目。

@@ -6,6 +6,7 @@ import {
   Card,
   Descriptions,
   Divider,
+  Input,
   InputNumber,
   Modal,
   Result,
@@ -21,7 +22,7 @@ import {
   ShoppingOutlined,
   WalletOutlined,
 } from '@ant-design/icons';
-import { InsufficientFundsError, shopApi } from '@/shop/api/shopClient';
+import { CaptchaRequiredError, InsufficientFundsError, shopApi } from '@/shop/api/shopClient';
 import type { ShopListing, ShopPurchaseResult } from '@/shop/api/shopClient';
 import { useShopAuth } from '@/shop/auth/ShopAuthContext';
 import StockTag, { isSoldOut } from '@/shop/components/StockTag';
@@ -70,7 +71,7 @@ export default function ShopListingDetail() {
   const notEnough = buyer ? balance < total : false;
   const soldOut = item ? isSoldOut(item.stock, item.stock_exact) : false;
 
-  const handleBuy = async () => {
+  const handleBuy = async (captcha?: { captcha_id: string; captcha_answer: string }) => {
     if (!buyer) {
       message.info('请先登录后再购买');
       navigate('/login', { state: { from: `/listings/${id}` } });
@@ -86,12 +87,17 @@ export default function ShopListingDetail() {
         // 每次点击生成新的 request_id；若网络重试需复用同一个，
         // 这里用一次点击一个 id 的方式即可满足幂等要求
         request_id: newRequestId(),
+        ...captcha,
       });
       setResult(res);
       await refresh();
       message.success('购买成功，卡密已发放');
     } catch (e) {
-      if (e instanceof InsufficientFundsError) {
+      if (e instanceof CaptchaRequiredError) {
+        // 风控要求验证码：弹一道题，答完带着答案重试。
+        // 不跳走页面 —— 否则用户已选的购买数量会丢。
+        await promptCaptchaAndRetry();
+      } else if (e instanceof InsufficientFundsError) {
         Modal.confirm({
           title: '余额不足',
           content: `当前余额 ¥${formatMoney(balance)}，本单需要 ¥${formatMoney(total)}。是否前往充值？`,
@@ -105,6 +111,65 @@ export default function ShopListingDetail() {
     } finally {
       setSubmitting(false);
     }
+  };
+
+  /**
+   * 弹出验证码，答完带着答案重新下单。
+   *
+   * 用 Modal 而不是跳转页：下单需要验证码通常只在「命中风控复核」时发生，
+   * 是低频分支，为它单独做一个页面不划算，也容易把用户搞懵。
+   */
+  const promptCaptchaAndRetry = async () => {
+    let challenge: { captcha_id: string; question: string };
+    try {
+      challenge = await shopApi.captcha();
+    } catch {
+      message.error('获取验证码失败，请稍后重试');
+      return;
+    }
+
+    let answer = '';
+    await new Promise<void>((resolve) => {
+      Modal.confirm({
+        title: '需要验证码',
+        content: (
+          <div style={{ marginTop: 12 }}>
+            <div style={{ marginBottom: 12, color: '#6b7280', fontSize: 13 }}>
+              本笔订单触发了安全校验，请输入计算结果后继续。
+            </div>
+            <Space.Compact style={{ width: '100%' }}>
+              <Input
+                placeholder="计算结果"
+                onChange={(e) => {
+                  answer = e.target.value;
+                }}
+                onPressEnter={() => {
+                  resolve();
+                  Modal.destroyAll();
+                }}
+              />
+              <Button
+                disabled
+                style={{ minWidth: 120, fontFamily: 'monospace', color: '#1f2937' }}
+              >
+                {challenge.question}
+              </Button>
+            </Space.Compact>
+          </div>
+        ),
+        okText: '继续下单',
+        cancelText: '取消',
+        onOk: () => resolve(),
+        onCancel: () => resolve(),
+      });
+    });
+
+    if (!answer.trim()) return;
+    // 验证码是一次性的，重试时重新走一遍完整下单（新 request_id）
+    await handleBuy({
+      captcha_id: challenge.captcha_id,
+      captcha_answer: answer.trim(),
+    });
   };
 
   if (loading) {
@@ -293,7 +358,7 @@ export default function ShopListingDetail() {
                   size="large"
                   loading={submitting}
                   disabled={soldOut}
-                  onClick={handleBuy}
+                  onClick={() => void handleBuy()}
                 >
                   {soldOut ? '暂时缺货' : buyer ? '立即购买' : '登录后购买'}
                 </Button>

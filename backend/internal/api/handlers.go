@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 
@@ -15,6 +16,32 @@ import (
 	"kamihub/internal/service"
 	"kamihub/internal/worker"
 )
+
+// antiRedPage 防红提示页。
+//
+// 刻意做成极简、无外链、不依赖 JS：这个页面出现时，
+// 用户的浏览器正处在「被平台判定为风险环境」的状态，
+// 任何外部资源都可能加载失败或再次触发拦截。
+// 只做一件事：告诉用户「复制链接到浏览器打开」。
+const antiRedPage = `<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>请用浏览器打开</title>
+<style>
+  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+       background:#f5f7fa;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;color:#1f2937}
+  .box{max-width:420px;padding:32px 24px;background:#fff;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,.06);text-align:center}
+  h1{font-size:19px;margin:0 0 12px}
+  p{font-size:14px;line-height:1.7;color:#4b5563;margin:0 0 10px}
+  .tip{font-size:13px;color:#6b7280;margin-top:16px}
+</style></head>
+<body><div class="box">
+  <h1>请用手机浏览器打开</h1>
+  <p>当前页面在微信 / QQ 内置浏览器中无法正常访问。</p>
+  <p>请点击右上角「···」，选择<b>「在浏览器打开」</b>。</p>
+  <p class="tip">如需帮助，请联系站点客服。</p>
+</div></body></html>`
 
 // Handlers 汇总所有依赖。
 type Handlers struct {
@@ -46,7 +73,7 @@ type Handlers struct {
 	worker    *worker.Runner
 
 	// ---------- 迭代 2：安全加固 ----------
-	totp   *service.TOTPService
+	totp    *service.TOTPService
 	captcha *service.CaptchaService
 	risk    *service.RiskService
 }
@@ -104,6 +131,12 @@ func NewHandlers(d Deps) *Handlers {
 
 // Register 挂载全部路由。
 func (h *Handlers) Register(r *gin.Engine) {
+	// 防红：微信/QQ 内置浏览器打开页面时给提示页而不是被平台拦截。
+	// 开关取自设置（默认关闭），每次请求现读 —— 改了立刻生效，不用重启。
+	r.Use(AntiRed(func() bool {
+		return h.settings.Security(context.Background()).AntiRedEnabled
+	}, antiRedPage))
+
 	r.Use(RequestID(), AccessLog(), Recovery(), CORS(nil))
 
 	// ---------- 健康检查 ----------

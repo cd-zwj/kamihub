@@ -443,6 +443,21 @@ export interface SecuritySettings {
   max_views: number;
   record_view_log: boolean;
   max_daily_amount: number;
+
+  // ---------- 迭代 2：安全开关（注意都是「反向」字段）----------
+  // 用 xxx_disabled 而不是 xxx_enabled：设置是一行 JSON，
+  // 缺失字段解码为 false。反向命名让「升级后旧配置没这个键」= 保持防护开启，
+  // 避免一次部署静默关掉全站防护。
+  /** 关闭验证码（默认 false = 开启） */
+  captcha_disabled: boolean;
+  /** 关闭风控评估（默认 false = 开启） */
+  risk_disabled: boolean;
+  /** 微信/QQ 内置浏览器提示（默认 false = 不拦截） */
+  anti_red_enabled: boolean;
+  /** 下单验证码策略：off / review / always */
+  order_captcha_mode: 'off' | 'review' | 'always' | string;
+  /** 验证码类型：arithmetic（内置）/ geetest / turnstile */
+  captcha_provider: string;
 }
 
 export interface AllSettings {

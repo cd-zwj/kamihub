@@ -542,6 +542,79 @@ export default function Settings() {
                     </Form.Item>
                   </Space>
 
+                  {/* ---------------- 迭代 2：安全开关 ---------------- */}
+                  <Divider orientation="left" plain style={{ marginTop: 8 }}>
+                    安全防护开关
+                  </Divider>
+                  <Alert
+                    type="info"
+                    showIcon
+                    style={{ marginBottom: 16 }}
+                    message="这些开关是「运维保险」，不是日常调节项"
+                    description="平时全部保持开启。只有在规则配错导致误伤、或排查线上问题时才临时关掉，处理完立刻打开。所有开关改完立即生效，无需重启。"
+                  />
+
+                  <Space size={24} wrap>
+                    <Form.Item
+                      name="captcha_disabled"
+                      label="关闭验证码"
+                      valuePropName="checked"
+                      extra="开启后注册/登录/下单都不再要求验证码（危险）"
+                      style={{ marginBottom: 12 }}
+                    >
+                      <Switch />
+                    </Form.Item>
+                    <Form.Item
+                      name="risk_disabled"
+                      label="关闭风控评估"
+                      valuePropName="checked"
+                      extra="开启后所有规则不再生效，仅保留命中日志"
+                      style={{ marginBottom: 12 }}
+                    >
+                      <Switch />
+                    </Form.Item>
+                    <Form.Item
+                      name="anti_red_enabled"
+                      label="微信/QQ 内置浏览器提示"
+                      valuePropName="checked"
+                      extra="开启后在微信/QQ 里打开会提示「用浏览器打开」，避免被平台拦截页顶掉"
+                      style={{ marginBottom: 12 }}
+                    >
+                      <Switch />
+                    </Form.Item>
+                  </Space>
+
+                  <Space size={24} wrap>
+                    <Form.Item
+                      name="order_captcha_mode"
+                      label="下单验证码策略"
+                      extra="review = 仅命中风控复核时要求（推荐）；always = 每单都要求；off = 不要求"
+                      style={{ width: 300 }}
+                    >
+                      <Select
+                        options={[
+                          { value: 'review', label: '仅风控复核时要求（推荐）' },
+                          { value: 'always', label: '每单都要求' },
+                          { value: 'off', label: '不要求' },
+                        ]}
+                      />
+                    </Form.Item>
+                    <Form.Item
+                      name="captcha_provider"
+                      label="验证码类型"
+                      extra="arithmetic = 内置算术题（零依赖）；第三方（极验/Turnstile）需先接入密钥，未接入时会自动回落到算术题"
+                      style={{ width: 320 }}
+                    >
+                      <Select
+                        options={[
+                          { value: 'arithmetic', label: '内置算术题（推荐）' },
+                          { value: 'geetest', label: '极验 GeeTest（未接入，会回落）' },
+                          { value: 'turnstile', label: 'Cloudflare Turnstile（未接入，会回落）' },
+                        ]}
+                      />
+                    </Form.Item>
+                  </Space>
+
                   <Button type="primary" htmlType="submit" icon={<SaveOutlined />} loading={saving}>
                     保存安全设置
                   </Button>

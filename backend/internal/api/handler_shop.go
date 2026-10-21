@@ -46,8 +46,12 @@ func (h *Handlers) shopRegister(c *gin.Context) {
 	}
 
 	// ---- 1. 验证码 ----
-	if !h.captchaCheck(c, req.CaptchaID, req.CaptchaAnswer) {
-		return
+	// 受设置里的「关闭验证码」开关控制：规则配错/被误伤时可以一键关掉，
+	// 不用改代码发版（这是对照 dujiaoka-next 的 is_open_img_code 学来的）。
+	if h.settings.Security(c.Request.Context()).CaptchaOn() {
+		if !h.captchaCheck(c, req.CaptchaID, req.CaptchaAnswer) {
+			return
+		}
 	}
 
 	// ---- 2. 风控 ----
@@ -146,7 +150,7 @@ func (h *Handlers) shopLogin(c *gin.Context) {
 	// 为什么不总是要求：登录页是转化漏斗最窄的地方，每次都要做题会赶走真买家。
 	// 只在「已经错过一次」时才加码 —— 真买家最多被多问一次，
 	// 而脚本必须每次都准备解题逻辑。
-	if h.captcha != nil && !h.cache.AllowN(ctx, limKey+":needcaptcha", 1) {
+	if h.captcha != nil && h.settings.Security(ctx).CaptchaOn() && !h.cache.AllowN(ctx, limKey+":needcaptcha", 1) {
 		if !h.captchaCheck(c, req.CaptchaID, req.CaptchaAnswer) {
 			return
 		}
@@ -328,6 +332,9 @@ type shopPurchaseReq struct {
 	ListingID uint   `json:"listing_id" binding:"required"`
 	Quantity  int    `json:"quantity"`
 	RequestID string `json:"request_id"`
+	// 验证码：仅当运营策略为 always、或本单命中风控 review 时才必须
+	CaptchaID     string `json:"captcha_id"`
+	CaptchaAnswer string `json:"captcha_answer"`
 }
 
 // shopPurchase 买家下单
@@ -362,7 +369,9 @@ func (h *Handlers) shopPurchase(c *gin.Context) {
 	// 为什么放在这里而不是 ShopOrderService 内部：
 	// 这里能拿到金额（BuyerQuote 与真正下单用的是同一个函数，结果一致），
 	// 又不用改动生产验证过的结算链路 —— 风控出问题不会连累下单。
-	if h.risk != nil {
+	sec := h.settings.Security(c.Request.Context())
+	needCaptcha := sec.OrderCaptchaMode == service.OrderCaptchaAlways
+	if h.risk != nil && sec.RiskOn() {
 		amount := 0.0
 		if row, total, qerr := h.listings.BuyerQuote(c.Request.Context(), req.ListingID, req.Quantity); qerr == nil && row != nil {
 			amount = total.InexactFloat64()
@@ -383,9 +392,32 @@ func (h *Handlers) shopPurchase(c *gin.Context) {
 			Fail(c, 403, "RISK_REJECTED", "该笔订单未通过风控校验；如有疑问请联系客服")
 			return
 		}
-		// review 不拦单：标记进人工队列即可。
-		// 让买家无感是刻意的 —— 拦下来只会把可疑用户赶走，
-		// 而放行后我们仍然有完整命中记录可以复查。
+		// review 的处理分两种，由运营的策略决定：
+		//   review 模式（默认）—— 要求过验证码，过了照常下单
+		//   off   模式        —— 只记命中记录，买家无感
+		// 刻意不直接拒绝：review 级规则的误报率天生比 reject 高，
+		// 直接拒掉会把正常买家赶走；加一道验证码既能挡住脚本，又不伤真人。
+		if decision.Level == models.LevelReview && sec.OrderCaptchaMode == service.OrderCaptchaReview {
+			needCaptcha = true
+		}
+	}
+
+	// ---- 下单验证码 ----
+	//
+	// 这是对照 dujiaoka-next 后补的一处：它把验证码恰好挂在下单口
+	// （is_open_img_code / is_open_geetest），而 kamihub 原来只挂了注册和登录。
+	// 下单才是最该设防的地方 —— 刷单、扫货、撞库存都在这里发生。
+	//
+	// 要求验证码时返回结构化错误码，前端据此取题重试；
+	// 不直接跳走，避免用户丢掉已填的购买数量。
+	if needCaptcha && sec.CaptchaOn() {
+		if strings.TrimSpace(req.CaptchaID) == "" || strings.TrimSpace(req.CaptchaAnswer) == "" {
+			Fail(c, 400, "CAPTCHA_REQUIRED", "本笔订单需要输入验证码")
+			return
+		}
+		if !h.captchaCheck(c, req.CaptchaID, req.CaptchaAnswer) {
+			return
+		}
 	}
 
 	res, err := h.shopOrders.Purchase(c.Request.Context(), service.ShopPurchaseInput{

@@ -78,7 +78,60 @@ type SecuritySettings struct {
 	MaxViews        int     `json:"max_views"`
 	RecordViewLog   bool    `json:"record_view_log"`
 	MaxDailyAmount  float64 `json:"max_daily_amount"` // 0 = 不限
+
+	// ---------- 迭代 2：安全开关（运维保险） ----------
+	//
+	// 为什么这几个字段是「反向」的（xxx_disabled 而不是 xxx_enabled）：
+	// settings 是一行 JSON，解码时缺失的字段等于零值 false。
+	// 如果用 xxx_enabled，那么「升级到新版本、旧配置里没有这个键」就会被解成
+	// 「功能关闭」—— 一次部署静默关掉全站防护，这是最危险的一类回归。
+	// 反向命名后，零值 = 保持原行为（防护开着），要关必须显式操作。
+	//
+	// 对照项目 dujiaoka-next 的做法：它的每个安全手段都有 is_open_xxx 开关
+	// （is_open_img_code / is_open_geetest / is_open_search_pwd），
+	// 好处是被误伤时能一键关掉，而不用改代码发版。这里保留这个「可关」能力。
+
+	// CaptchaDisabled 关闭注册/登录验证码。默认 false = 开启。
+	CaptchaDisabled bool `json:"captcha_disabled"`
+	// RiskDisabled 关闭风控评估。默认 false = 开启。
+	// 关掉后所有规则不再评估（仍会写日志），用于规则配错导致误拦时应急。
+	RiskDisabled bool `json:"risk_disabled"`
+	// AntiRedEnabled 启用「防红」：微信/QQ 内置浏览器打开时给出提示页。
+	// 默认 false = 不拦截（这是新增行为，默认不改变现状）。
+	AntiRedEnabled bool `json:"anti_red_enabled"`
+	// OrderCaptchaMode 下单验证码策略：off / review / always。
+	// 空串按 review 处理（归一化在 Security() 里做）。
+	OrderCaptchaMode string `json:"order_captcha_mode"`
+	// CaptchaProvider 验证码实现：空串或 arithmetic = 内置算术题。
+	// 预留 geetest / turnstile 等第三方接入位，见 CaptchaService 的说明。
+	CaptchaProvider string `json:"captcha_provider"`
 }
+
+// 下单验证码策略
+const (
+	OrderCaptchaOff    = "off"
+	OrderCaptchaReview = "review" // 仅风控判为 review 时要求（默认）
+	OrderCaptchaAlways = "always"
+)
+
+// NormalizeOrderCaptchaMode 把策略归一到合法值。
+//
+// 空串（老配置没有这个键）按 review 处理，而不是 off ——
+// 默认应当是「有防护」，需要放宽时由运营显式选 off。
+func NormalizeOrderCaptchaMode(mode string) string {
+	switch mode {
+	case OrderCaptchaOff, OrderCaptchaReview, OrderCaptchaAlways:
+		return mode
+	default:
+		return OrderCaptchaReview
+	}
+}
+
+// CaptchaOn 是否启用验证码（注册/登录）
+func (s SecuritySettings) CaptchaOn() bool { return !s.CaptchaDisabled }
+
+// RiskOn 是否启用风控评估
+func (s SecuritySettings) RiskOn() bool { return !s.RiskDisabled }
 
 // JWT TTL 允许的小时范围。
 // 上限一年：再长对「无状态、无法单独吊销」的 JWT 来说风险过大。
@@ -337,6 +390,8 @@ func (s *SettingsService) Security(ctx context.Context) SecuritySettings {
 	// 令牌有效期同样做区间归正：老数据里没有这个字段时是 0，
 	// 直接用会导致签发的令牌立刻过期，所以必须补默认值。
 	out.JWTTTLHours = NormalizeJWTTTLHours(out.JWTTTLHours)
+	// 下单验证码策略归一：空串（老配置）按 review
+	out.OrderCaptchaMode = NormalizeOrderCaptchaMode(out.OrderCaptchaMode)
 	return out
 }
 

@@ -39,6 +39,19 @@ export class InsufficientFundsError extends Error {
   }
 }
 
+/**
+ * 下单需要验证码。
+ *
+ * 为什么单独一个类型而不是靠匹配文案：页面要根据它**弹验证码输入并重试**，
+ * 匹配中文文案一旦改字就失效，而且是静默失效（用户只会看到「购买失败」）。
+ */
+export class CaptchaRequiredError extends Error {
+  constructor(msg: string) {
+    super(msg);
+    this.name = 'CaptchaRequiredError';
+  }
+}
+
 http.interceptors.response.use(
   (res) => res,
   (error: AxiosError<Envelope<unknown>>) => {
@@ -53,6 +66,11 @@ http.interceptors.response.use(
     }
     if (status === 402) {
       return Promise.reject(new InsufficientFundsError(msg));
+    }
+    // 下单需要验证码：后端用 400 + error_code=CAPTCHA_REQUIRED 表达，
+    // 这是「可继续」的业务分支，不是失败 —— 页面应弹验证码后重试。
+    if (payload?.error_code === 'CAPTCHA_REQUIRED' || payload?.error_code === 'CAPTCHA_INVALID') {
+      return Promise.reject(new CaptchaRequiredError(msg));
     }
     return Promise.reject(new Error(msg));
   },
@@ -242,8 +260,14 @@ export const shopApi = {
     unwrap<{ amount: string; balance: string }>(http.post('/wallet/recharge', { code })),
 
   // ---------- 订单 ----------
-  purchase: (body: { listing_id: number; quantity: number; request_id: string }) =>
-    unwrap<ShopPurchaseResult>(http.post('/orders', body)),
+  purchase: (body: {
+    listing_id: number;
+    quantity: number;
+    request_id: string;
+    /** 验证码：仅当运营策略为 always、或本单命中风控复核时才必须 */
+    captcha_id?: string;
+    captcha_answer?: string;
+  }) => unwrap<ShopPurchaseResult>(http.post('/orders', body)),
   orders: (q: { page?: number; page_size?: number; status?: string } = {}) =>
     unwrap<PageResult<ShopOrderView>>(http.get('/orders', { params: q })),
   order: (id: number) => unwrap<ShopOrderView>(http.get(`/orders/${id}`)),

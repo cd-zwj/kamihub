@@ -63,6 +63,27 @@ async function registerBuyer(username, password) {
   });
 }
 
+/**
+ * 下单（自动处理 CAPTCHA_REQUIRED）。
+ *
+ * 为什么需要这个：脚本反复从 127.0.0.1 下单，会命中风控的
+ * 「同 IP 下单频率」规则 → 后端返回 400 + error_code=CAPTCHA_REQUIRED。
+ * 这是**预期行为**，不是故障；脚本应当像真人一样答题后重试，
+ * 顺便也就把「下单验证码」这条新链路验证了一遍。
+ */
+async function placeOrder(token, body) {
+  let res = await api('/api/shop/orders', { method: 'POST', token, body });
+  if (res.status === 400 && res.json?.error_code === 'CAPTCHA_REQUIRED') {
+    const cap = await solveCaptcha();
+    res = await api('/api/shop/orders', {
+      method: 'POST',
+      token,
+      body: { ...body, captcha_id: cap.captcha_id, captcha_answer: cap.captcha_answer },
+    });
+  }
+  return res;
+}
+
 async function main() {
   // ---- 1. 登录 ----
   const login = await api('/api/auth/login', {
@@ -179,13 +200,10 @@ async function main() {
 
     const adminToken = TOKEN;
     TOKEN = buyerToken;
-    const order = await api('/api/shop/orders', {
-      method: 'POST',
-      body: {
-        listing_id: listingId,
-        quantity: 2,
-        request_id: `smoke-hybrid-${tag}`,
-      },
+    const order = await placeOrder(buyerToken, {
+      listing_id: listingId,
+      quantity: 2,
+      request_id: `smoke-hybrid-${tag}`,
     });
     TOKEN = adminToken;
     const ord = order.json?.data;
@@ -293,9 +311,10 @@ async function main() {
 
       const adminToken = TOKEN;
       TOKEN = tokenB;
-      const orderB = await api('/api/shop/orders', {
-        method: 'POST',
-        body: { listing_id: listingBId, quantity: 2, request_id: `smoke-hybrid-b-${tag}` },
+      const orderB = await placeOrder(tokenB, {
+        listing_id: listingBId,
+        quantity: 2,
+        request_id: `smoke-hybrid-b-${tag}`,
       });
       TOKEN = adminToken;
       const ordB = orderB.json?.data;
