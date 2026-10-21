@@ -474,4 +474,24 @@ func (h *Handlers) auditLog(c *gin.Context, action, targetType, targetID string,
 	h.audit.Record(c.Request.Context(), uid, username, action, targetType, targetID, detail, c.ClientIP())
 }
 
+// auditChange 记录「改前 → 改后」。
+//
+// 与 auditLog 的区别：这里传的是前后两份快照，由 service 层算出真正变化的字段，
+// 并自动脱敏敏感字段。凡是「修改某项配置/数据」的动作都应该用这个，
+// 否则事后只看到「有人改了设置」，看不出改成了什么。
+func (h *Handlers) auditChange(
+	c *gin.Context, action, targetType, targetID string,
+	before, after map[string]any,
+) {
+	user := CurrentUser(c)
+	var uid *uint
+	username := ""
+	if user != nil {
+		uid = &user.ID
+		username = user.Username
+	}
+	h.audit.RecordChange(c.Request.Context(), uid, username,
+		action, targetType, targetID, c.ClientIP(), before, after)
+}
+
 var _ = slog.Default

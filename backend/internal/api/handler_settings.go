@@ -7,6 +7,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"kamihub/internal/models"
+	"kamihub/internal/service"
 )
 
 func nowTime() time.Time { return time.Now() }
@@ -34,11 +35,23 @@ func (h *Handlers) updateSetting(c *gin.Context) {
 		BadRequest(c, "设置内容不是合法 JSON")
 		return
 	}
+
+	// 改之前先取出旧值 —— 差量审计的全部意义就在这个 before 上。
+	var before map[string]any
+	if all, err := h.settings.GetAll(c.Request.Context()); err == nil {
+		if old, ok := all[key]; ok {
+			before = service.SnapshotJSON(old)
+		}
+	}
+
 	if err := h.settings.Update(c.Request.Context(), key, raw); err != nil {
 		Abort(c, err)
 		return
 	}
-	h.auditLog(c, "settings.update", "setting", key, nil)
+	// 记录「改了哪些字段、从什么改成什么」。
+	// 像 security / payment 这两类设置改错会直接漏钱，
+	// 只记「有人改了设置」等于没记。
+	h.auditChange(c, "settings.update", "setting", key, before, service.SnapshotJSON(raw))
 	OK(c, gin.H{"message": "已保存"})
 }
 

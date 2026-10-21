@@ -1,4 +1,4 @@
-﻿package api
+package api
 
 import (
 	"encoding/json"
@@ -9,6 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"kamihub/internal/models"
+	"kamihub/internal/service"
 )
 
 // ---------------------------------------------------------------- 风控规则
@@ -89,13 +90,19 @@ func (h *Handlers) updateRiskRule(c *gin.Context) {
 		}
 	}
 
-	h.auditLog(c, "risk.rule_update", "risk_rule", rule.Code, updates)
-
+	// 记差量而不是只记「新值」：规则调松/调紧直接影响误拦率，
+	// 事后要能看出「原来阈值是多少」。config 是 JSON 列，快照后逐字段比较。
+	// 记差量而不是只记「新值」：规则调松/调紧直接影响误拦率，
+	// 事后要能看出「原来阈值是多少」。config 是 JSON 列，快照后逐字段比较。
 	var fresh models.RiskRule
 	if err := h.db.WithContext(c.Request.Context()).First(&fresh, id).Error; err == nil {
+		h.auditChange(c, "risk.rule_update", "risk_rule", rule.Code,
+			service.Snapshot(&rule), service.Snapshot(&fresh))
 		OK(c, fresh)
 		return
 	}
+	h.auditChange(c, "risk.rule_update", "risk_rule", rule.Code,
+		service.Snapshot(&rule), service.Snapshot(updates))
 	OK(c, gin.H{"message": "已更新"})
 }
 

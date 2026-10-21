@@ -344,6 +344,65 @@ async function main() {
   const saveContact = await api('/api/settings/contact', { method: 'PUT', body: contact });
   check('保存卖家联系方式', saveContact.status === 200);
 
+  // ---------- S4：审计日志必须记录「改前 → 改后」----------
+  //
+  // 只记「有人改了设置」等于没记：事后要能看出改了哪个字段、从什么改成什么。
+  // 注意：必须制造一次**真实变更**才谈得上差异 —— 内容完全相同的保存
+  // 应该记成空数组（这正是「只记变化字段」的正确行为），所以下面带唯一后缀。
+  const uniqueNotice = `S4 差异检查 ${Date.now().toString(36)}`;
+  await api('/api/settings/contact', {
+    method: 'PUT',
+    body: { ...contact, notice: uniqueNotice },
+  });
+  await sleep(300);
+
+  const diffAudit = await api('/api/audit-logs?page=1&page_size=20&action=settings.update');
+  const diffRows = diffAudit.json?.data?.list || [];
+  const contactRow = diffRows.find((r) => r.target_id === 'contact');
+  check('审计记录了设置变更', Boolean(contactRow), `找到 ${diffRows.length} 条 settings.update`);
+  const changed = contactRow?.detail?.changed;
+  check(
+    '审计详情是差量结构（changed 数组）',
+    Array.isArray(changed) && changed.length > 0,
+    JSON.stringify(changed)?.slice(0, 160),
+  );
+  const noticeChange = (changed || []).find((c) => c.field === 'notice');
+  check(
+    '差量记录了改前与改后的值',
+    noticeChange?.after === uniqueNotice && noticeChange?.before !== uniqueNotice,
+    JSON.stringify(noticeChange),
+  );
+  check(
+    '未变化的字段不出现在差量里',
+    !(changed || []).some((c) => c.field === 'work_hours'),
+    JSON.stringify((changed || []).map((c) => c.field)),
+  );
+
+  // 敏感字段必须只留标记、不留值
+  const payBefore = { enabled: true, pid: 'e2e-pid', key: 'E2E-SECRET-KEY-AAA', api_url: 'https://pay.e2e' };
+  await api('/api/settings/payment', { method: 'PUT', body: payBefore });
+  await sleep(200);
+  const payAfter = { ...payBefore, key: 'E2E-SECRET-KEY-BBB' };
+  await api('/api/settings/payment', { method: 'PUT', body: payAfter });
+  await sleep(300);
+
+  const payAudit = await api('/api/audit-logs?page=1&page_size=20&action=settings.update');
+  const payRows = payAudit.json?.data?.list || [];
+  const payRaw = JSON.stringify(payRows);
+  check(
+    '支付密钥原文没有进审计日志',
+    !payRaw.includes('E2E-SECRET-KEY'),
+    payRaw.includes('E2E-SECRET-KEY') ? '泄露了！' : '未出现',
+  );
+  const payKeyChange = (payRows.find((r) => r.target_id === 'payment')?.detail?.changed || []).find(
+    (c) => c.field === 'key',
+  );
+  check(
+    '敏感字段只记录「改过」不含值',
+    Boolean(payKeyChange) && payKeyChange.masked === true && !payKeyChange.before && !payKeyChange.after,
+    JSON.stringify(payKeyChange),
+  );
+
   const deliveryURL = buy1.json?.data?.delivery_url;
   const pageRes = await fetch(deliveryURL);
   const html = await pageRes.text();

@@ -68,12 +68,18 @@ func (h *Handlers) updateGoods(c *gin.Context) {
 	if !BindJSON(c, &in) {
 		return
 	}
+	// 改之前留快照：商品改价、改库存模式都会影响营收，必须能看出改了什么
+	var before map[string]any
+	if old, err := h.goods.Get(c.Request.Context(), id); err == nil {
+		before = service.Snapshot(old)
+	}
+
 	g, err := h.goods.Update(c.Request.Context(), id, in)
 	if err != nil {
 		Abort(c, err)
 		return
 	}
-	h.auditLog(c, "goods.update", "goods", g.Code, nil)
+	h.auditChange(c, "goods.update", "goods", g.Code, before, service.Snapshot(g))
 	OK(c, g)
 }
 

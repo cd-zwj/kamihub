@@ -9,6 +9,7 @@ import (
 	"gorm.io/datatypes"
 
 	"kamihub/internal/models"
+	"kamihub/internal/service"
 )
 
 // listAdapters 返回所有已注册的平台适配器，前端据此渲染「新增平台」表单。
@@ -239,16 +240,35 @@ func (h *Handlers) updatePlatform(c *gin.Context) {
 		}
 	}
 
+	// 改之前留一份快照。Platform.Credentials 是 json:"-"，快照天然拿不到密文（好），
+	// 所以额外用一个布尔标记表达「凭证被换过」这件事实。
+	before := service.Snapshot(&p)
+	if before == nil {
+		before = map[string]any{}
+	}
+	before["credentials_changed"] = false
+
 	if err := h.db.Model(&models.Platform{}).Where("id = ?", id).Updates(updates).Error; err != nil {
 		ServerError(c, "更新失败")
 		return
 	}
-	h.auditLog(c, "platform.update", "platform", p.Name, nil)
 
+	after := map[string]any{}
+	credentialsChanged := false
+	if _, ok := updates["credentials"]; ok {
+		credentialsChanged = true
+	}
 	if err := h.db.First(&p, id).Error; err != nil {
 		ServerError(c, "读取失败")
 		return
 	}
+	after = service.Snapshot(&p)
+	if after == nil {
+		after = map[string]any{}
+	}
+	after["credentials_changed"] = credentialsChanged
+
+	h.auditChange(c, "platform.update", "platform", p.Name, before, after)
 	OK(c, h.platforms.ToMasked(&p))
 }
 

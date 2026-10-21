@@ -247,18 +247,25 @@ func (h *Handlers) updateUser(c *gin.Context) {
 		updates["status"] = *req.Status
 	}
 
+	// 改之前留快照。改角色/禁用账号是最需要事后追查的动作 ——
+	// 「谁在什么时候把某人的权限降了」必须能回答。
+	before := service.Snapshot(&user)
+
 	if len(updates) > 0 {
 		if err := h.db.Model(&models.User{}).Where("id = ?", id).Updates(updates).Error; err != nil {
 			ServerError(c, "更新失败")
 			return
 		}
 	}
-	h.auditLog(c, "user.update", "user", user.Username, updates)
 
 	if err := h.db.First(&user, id).Error; err != nil {
 		ServerError(c, "读取失败")
 		return
 	}
+	// 这里用差量：password_hash / totp_secret 在 auditdiff 的跳过表里，
+	// 就算以后顺手把它们也改了，也不会进审计日志。
+	h.auditChange(c, "user.update", "user", user.Username, before, service.Snapshot(&user))
+
 	OK(c, user)
 }
 

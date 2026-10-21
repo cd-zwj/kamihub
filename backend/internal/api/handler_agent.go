@@ -367,15 +367,20 @@ func (h *Handlers) adminUpdateTier(c *gin.Context) {
 	if !BindJSON(c, &in) {
 		return
 	}
+	// 改之前留快照：折扣率直接决定所有销售看到的价格，改错一个点就是全线亏损
+	var before map[string]any
+	var oldTier models.PriceTier
+	if err := h.db.WithContext(c.Request.Context()).First(&oldTier, id).Error; err == nil {
+		before = service.Snapshot(&oldTier)
+	}
+
 	tier, err := h.pricing.UpdateTier(c.Request.Context(), id, in)
 	if err != nil {
 		Abort(c, err)
 		return
 	}
-	h.auditLog(c, "agent.tier_update", "price_tier", tier.Code, gin.H{
-		"discount_rate": tier.DiscountRate.String(),
-		"enabled":       tier.Enabled,
-	})
+	h.auditChange(c, "agent.tier_update", "price_tier", tier.Code,
+		before, service.Snapshot(tier))
 	OK(c, tier)
 }
 

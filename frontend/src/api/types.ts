@@ -658,6 +658,19 @@ export interface CallLog {
   created_at: string;
 }
 
+/**
+ * 审计日志里的单个字段变化（S4）。
+ *
+ * masked=true 表示这是敏感字段（密钥/密码/token）：只记「改过」，
+ * 前后值都不会出现在日志里。
+ */
+export interface AuditFieldChange {
+  field: string;
+  before?: unknown;
+  after?: unknown;
+  masked?: boolean;
+}
+
 export interface AuditLog {
   id: number;
   user_id?: number | null;
@@ -665,9 +678,18 @@ export interface AuditLog {
   action: string;
   target_type: string;
   target_id: string;
-  detail: unknown;
+  /** 差量结构：{ changed: AuditFieldChange[] }；老记录可能是任意 JSON 或 null */
+  detail: { changed?: AuditFieldChange[] } & Record<string, unknown> | null;
   ip: string;
   created_at: string;
+}
+
+/** 从审计 detail 里取出字段变化列表；不是差量结构时返回 null */
+export function auditChanges(detail: AuditLog['detail']): AuditFieldChange[] | null {
+  if (!detail || typeof detail !== 'object') return null;
+  const changed = (detail as { changed?: unknown }).changed;
+  if (!Array.isArray(changed)) return null;
+  return changed as AuditFieldChange[];
 }
 
 /** 订单状态中文名 */

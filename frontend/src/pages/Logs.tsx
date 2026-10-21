@@ -1,10 +1,10 @@
-﻿import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Alert, Button, Card, Drawer, message, Popconfirm, Select, Space, Switch, Table, Tabs, Tag, Typography } from 'antd';
 import { ReloadOutlined } from '@ant-design/icons';
 import { api, toastError } from '@/api/client';
 import { useDrawerWidth } from '@/hooks/useIsMobile';
 import type { AuditLog, CallLog, Notification, Platform, ReconcileDiff, WorkerTask } from '@/api/types';
-import { LEVEL_COLOR, reconcileKindText, taskText } from '@/api/types';
+import { LEVEL_COLOR, auditChanges, reconcileKindText, taskText } from '@/api/types';
 import { fmtTime } from '@/utils/format';
 
 const ACTION_TEXT: Record<string, string> = {
@@ -34,6 +34,73 @@ const ACTION_TEXT: Record<string, string> = {
   'delivery.set_password': '设置访问密码',
   'settings.update': '修改系统设置',
 };
+
+/** 把任意值压成适合表格里看的一小段文字 */
+function shortValue(v: unknown): string {
+  if (v === null || v === undefined) return '（空）';
+  if (typeof v === 'string') return v === '' ? '（空串）' : v;
+  if (typeof v === 'boolean') return v ? '是' : '否';
+  if (typeof v === 'number') return String(v);
+  try {
+    const s = JSON.stringify(v);
+    return s.length > 120 ? `${s.slice(0, 120)}…` : s;
+  } catch {
+    return String(v);
+  }
+}
+
+/**
+ * 审计详情单元格。
+ *
+ * S4 起后端会写 { changed: [{field, before, after, masked}] }，
+ * 这里渲染成「字段：旧 → 新」；老记录没有这个结构，退回显示原始 JSON。
+ */
+function AuditDetailCell({ record }: { record: AuditLog }) {
+  const changes = auditChanges(record.detail);
+  if (!changes) {
+    return (
+      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+        {record.detail ? JSON.stringify(record.detail) : '-'}
+      </Typography.Text>
+    );
+  }
+  if (changes.length === 0) {
+    return (
+      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+        无字段变化
+      </Typography.Text>
+    );
+  }
+  return (
+    <Space direction="vertical" size={2} style={{ width: '100%' }}>
+      {changes.slice(0, 4).map((ch) => (
+        <div key={ch.field} style={{ fontSize: 12, lineHeight: 1.5 }}>
+          <Typography.Text code style={{ fontSize: 11 }}>{ch.field}</Typography.Text>{' '}
+          {ch.masked ? (
+            <Tag color="orange" style={{ marginInlineStart: 4 }}>
+              已修改（敏感值不记录）
+            </Tag>
+          ) : (
+            <>
+              <Typography.Text delete type="secondary" style={{ fontSize: 12 }}>
+                {shortValue(ch.before)}
+              </Typography.Text>
+              <span style={{ margin: '0 6px', color: '#999' }}>→</span>
+              <Typography.Text strong style={{ fontSize: 12 }}>
+                {shortValue(ch.after)}
+              </Typography.Text>
+            </>
+          )}
+        </div>
+      ))}
+      {changes.length > 4 && (
+        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          另有 {changes.length - 4} 个字段
+        </Typography.Text>
+      )}
+    </Space>
+  );
+}
 
 export default function Logs() {
   // 抽屉宽度：手机满屏、桌面固定宽（移动端适配）
@@ -350,7 +417,7 @@ export default function Logs() {
                       {
                         title: '详情',
                         ellipsis: true,
-                        render: (_, r) => (r.detail ? JSON.stringify(r.detail) : '-'),
+                        render: (_, r) => <AuditDetailCell record={r} />,
                       },
                     ]}
                   />

@@ -20,6 +20,26 @@ func NewAuditService(db *gorm.DB) *AuditService {
 	return &AuditService{db: db}
 }
 
+// RecordChange 记录「改前 → 改后」，只写真正变化的字段。
+//
+// detail 会落成这样的结构，前端据此渲染成一张小表：
+//
+//	{"changed":[{"field":"jwt_ttl_hours","before":12,"after":168},
+//	            {"field":"key","masked":true}]}
+//
+// 敏感字段只留掩码标记（见 auditdiff.go 的说明）。
+func (s *AuditService) RecordChange(
+	ctx context.Context, userID *uint, username, action, targetType, targetID, ip string,
+	before, after map[string]any,
+) {
+	fields := DiffFields(before, after)
+	if fields == nil {
+		fields = []FieldChange{}
+	}
+	s.Record(ctx, userID, username, action, targetType, targetID,
+		map[string]any{"changed": fields}, ip)
+}
+
 // Record 写一条审计日志（异步，不阻塞请求）。
 func (s *AuditService) Record(ctx context.Context, userID *uint, username, action, targetType, targetID string, detail any, ip string) {
 	var raw json.RawMessage

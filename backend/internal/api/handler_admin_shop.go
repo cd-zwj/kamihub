@@ -302,6 +302,13 @@ func (h *Handlers) updateListing(c *gin.Context) {
 	if !BindJSON(c, &req) {
 		return
 	}
+	// 改之前留快照：售价、是否上架直接影响成交，改错了要能倒查
+	var before map[string]any
+	var oldRow models.Listing
+	if err := h.db.WithContext(c.Request.Context()).First(&oldRow, id).Error; err == nil {
+		before = service.Snapshot(&oldRow)
+	}
+
 	row, err := h.listings.Update(c.Request.Context(), id, req)
 	if err != nil {
 		if errors.Is(err, service.ErrListingNotFound) {
@@ -315,9 +322,7 @@ func (h *Handlers) updateListing(c *gin.Context) {
 		BadRequest(c, err.Error())
 		return
 	}
-	h.auditLog(c, "listing.update", "listing", itoa(int64(id)), gin.H{
-		"title": row.Title, "sale_price": row.SalePrice.String(), "is_listed": row.IsListed,
-	})
+	h.auditChange(c, "listing.update", "listing", itoa(int64(id)), before, service.Snapshot(row))
 	OK(c, row)
 }
 
