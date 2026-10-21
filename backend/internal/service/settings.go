@@ -123,16 +123,23 @@ type SecuritySettings struct {
 	// 需确认的动作：新建/修改上游平台、人工调整买家余额、查看卡密明文。
 	// 这几个都不可逆，且后台登录态是长期 JWT —— 手机被人拿到就够了。
 	ConfirmDisabled bool `json:"confirm_disabled"`
-	// LoginAlertDisabled 关闭「新 IP 登录提醒」。默认 false = 提醒。
-	// 关掉后仍会记录 IP（表 user_login_ips），只是不再推告警。
-	LoginAlertDisabled bool `json:"login_alert_disabled"`
+	// LoginAlertMode 新登录提醒的判定方式：device / ip / off。
+	//
+	// 默认 device（空串也归一到 device）：
+	// 按浏览器 Cookie 判定「新设备」，不看 IP。
+	// 原因是站长常用代理/梯子访问后台，出口 IP 每次都不一样 ——
+	// 按 IP 判会让他自己每次登录都被提醒，几天后就会关掉，功能等于没做。
+	// 而攻击者在本机登录必然没有你的浏览器 Cookie，一定会触发。
+	LoginAlertMode string `json:"login_alert_mode"`
 }
 
 // ConfirmOn 是否需要敏感操作二次确认
 func (s SecuritySettings) ConfirmOn() bool { return !s.ConfirmDisabled }
 
-// LoginAlertOn 是否推送新 IP 登录提醒
-func (s SecuritySettings) LoginAlertOn() bool { return !s.LoginAlertDisabled }
+// LoginAlertOn 是否推送新登录提醒（off 以外都算开启）
+func (s SecuritySettings) LoginAlertOn() bool {
+	return NormalizeLoginAlertMode(s.LoginAlertMode) != LoginAlertOff
+}
 
 // AgentEnabled 阶梯专价是否启用
 func (s SecuritySettings) AgentEnabled() bool { return !s.AgentDisabled }

@@ -22,7 +22,7 @@ import {
 import type { ColumnsType } from 'antd/es/table';
 import { SafetyOutlined, ReloadOutlined, DeleteOutlined, WarningOutlined } from '@ant-design/icons';
 import { api, toastError } from '@/api/client';
-import type { BlacklistEntry, RiskHit, RiskRule, SecuritySettings, TOTPSetupResult, TOTPStatus } from '@/api/types';
+import type { BlacklistEntry, LoginIPRecord, RiskHit, RiskRule, SecuritySettings, TOTPSetupResult, TOTPStatus, TrustedDevice } from '@/api/types';
 import {
   BLACKLIST_KIND_TEXT,
   RISK_ACTION_TEXT,
@@ -757,7 +757,7 @@ function SecurityPolicy() {
   }, [load]);
 
   const confirmOn = !(security?.confirm_disabled === true);
-  const alertOn = !(security?.login_alert_disabled === true);
+  const alertMode = security?.login_alert_mode || 'device';
 
   const patch = async (body: Partial<SecuritySettings>) => {
     if (!security) return;
@@ -774,47 +774,231 @@ function SecurityPolicy() {
   };
 
   return (
-    <Card title="攻击面收敛" loading={loading}>
-      <Alert
-        type="info"
-        showIcon
-        style={{ marginBottom: 16 }}
-        message="这两项都是「开着更安全、关掉更顺手」的取舍，改动立即生效，不需要重启。"
+    <Space direction="vertical" size={16} style={{ width: '100%' }}>
+      <Card title="攻击面收敛" loading={loading}>
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message="这两项都是「开着更安全、关掉更顺手」的取舍，改动立即生效，不需要重启。"
+        />
+
+        <Space direction="vertical" size={20} style={{ width: '100%' }}>
+          <div>
+            <Space align="center">
+              <Switch
+                checked={confirmOn}
+                loading={saving}
+                onChange={(v) => void patch({ confirm_disabled: !v })}
+              />
+              <Text strong>敏感操作需要再输一次密码</Text>
+            </Space>
+            <Paragraph type="secondary" style={{ margin: '6px 0 0 44px', fontSize: 13 }}>
+              覆盖：新建/修改上游平台、人工调整买家余额、查看卡密明文。
+              确认一次 10 分钟内有效，不用每次都输。
+              关掉后，拿到你已登录浏览器的人可以直接改凭证、调余额、导出卡密。
+            </Paragraph>
+          </div>
+
+          <div>
+            <Space align="center" wrap>
+              <Text strong>新登录提醒</Text>
+              <Select
+                size="small"
+                style={{ width: 220 }}
+                value={alertMode}
+                loading={saving}
+                disabled={!security}
+                onChange={(v) => void patch({ login_alert_mode: v })}
+                options={[
+                  { value: 'device', label: '按浏览器设备（推荐）' },
+                  { value: 'ip', label: '按 IP 地址' },
+                  { value: 'off', label: '关闭，只记录' },
+                ]}
+              />
+            </Space>
+            <Paragraph type="secondary" style={{ margin: '6px 0 0 0', fontSize: 13 }}>
+              员工账号登录时会推送提醒（站内信 + 已配置渠道）。
+              每个新设备单独推送，不会被聚合窗口合并。
+            </Paragraph>
+            {alertMode === 'device' && (
+              <Alert
+                type="success"
+                showIcon
+                style={{ marginTop: 8 }}
+                message="推荐：按设备判定，不看 IP"
+                description={
+                  <span style={{ fontSize: 13 }}>
+                    登录成功后在浏览器写一个长期 Cookie（180 天）。同一台电脑的浏览器再来，
+                    哪怕你用梯子换了 IP、换了城市，都不会提醒；
+                    而别人在自己电脑上登录时没有这个 Cookie，一定会提醒 ——
+                    这才是「账号被盗用」真正该被看见的信号。
+                  </span>
+                }
+              />
+            )}
+            {alertMode === 'ip' && (
+              <Alert
+                type="warning"
+                showIcon
+                style={{ marginTop: 8 }}
+                message="注意：按 IP 判定，每次换 IP 都会提醒"
+                description={
+                  <span style={{ fontSize: 13 }}>
+                    如果你用代理/梯子访问后台，出口 IP 每次都不一样，
+                    这个模式会让你每次登录都收到提醒，很快就会被关掉。
+                    只有在你确认自己出口 IP 固定（比如公司专线）时才用。
+                  </span>
+                }
+              />
+            )}
+          </div>
+        </Space>
+      </Card>
+
+      <TrustedDevicesCard />
+    </Space>
+  );
+}
+
+/**
+ * 已信任设备与登录 IP。
+ *
+ * 收到「有新设备登录」提醒后，来这里核对：
+ * 认识的留着，不认识的点「移除」，那台浏览器下次登录会重新提醒。
+ * 只有「能查、能删」，告警才有闭环。
+ */
+function TrustedDevicesCard() {
+  const [devices, setDevices] = useState<TrustedDevice[]>([]);
+  const [ips, setIps] = useState<LoginIPRecord[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await api.myDevices();
+      setDevices(res.devices || []);
+      setIps(res.ips || []);
+    } catch (e) {
+      toastError(e);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const forget = async (id: number) => {
+    try {
+      await api.forgetDevice(id);
+      message.success('已移除，该设备下次登录会重新提醒');
+      void load();
+    } catch (e) {
+      toastError(e);
+    }
+  };
+
+  const deviceColumns: ColumnsType<TrustedDevice> = [
+    { title: '设备', dataIndex: 'label', width: 150 },
+    {
+      title: '最近 IP',
+      dataIndex: 'last_ip',
+      width: 150,
+      render: (v: string) => <Text copyable style={{ fontSize: 12 }}>{v || '-'}</Text>,
+    },
+    {
+      title: '首次使用',
+      dataIndex: 'first_seen_at',
+      width: 160,
+      render: (v: string) => <Text style={{ fontSize: 12 }}>{fmtTime(v)}</Text>,
+    },
+    {
+      title: '最近登录',
+      dataIndex: 'last_seen_at',
+      width: 160,
+      render: (v: string) => <Text style={{ fontSize: 12 }}>{fmtTime(v)}</Text>,
+    },
+    { title: '次数', dataIndex: 'hit_count', width: 70 },
+    {
+      title: '操作',
+      width: 90,
+      render: (_, r) => (
+        <Popconfirm title="移除后该浏览器下次登录会重新提醒" onConfirm={() => void forget(r.id)}>
+          <Button size="small" danger>
+            移除
+          </Button>
+        </Popconfirm>
+      ),
+    },
+  ];
+
+  const ipColumns: ColumnsType<LoginIPRecord> = [
+    {
+      title: 'IP',
+      dataIndex: 'ip',
+      width: 170,
+      render: (v: string) => <Text copyable style={{ fontSize: 12 }}>{v}</Text>,
+    },
+    {
+      title: '首次出现',
+      dataIndex: 'first_seen_at',
+      width: 160,
+      render: (v: string) => <Text style={{ fontSize: 12 }}>{fmtTime(v)}</Text>,
+    },
+    {
+      title: '最近使用',
+      dataIndex: 'last_seen_at',
+      width: 160,
+      render: (v: string) => <Text style={{ fontSize: 12 }}>{fmtTime(v)}</Text>,
+    },
+    { title: '次数', dataIndex: 'hit_count', width: 70 },
+    {
+      title: 'UA',
+      dataIndex: 'user_agent',
+      render: (v: string) => (
+        <Text type="secondary" style={{ fontSize: 11 }} ellipsis={{ tooltip: v }}>
+          {v || '-'}
+        </Text>
+      ),
+    },
+  ];
+
+  return (
+    <Card
+      title="已信任设备与登录 IP"
+      loading={loading}
+      extra={<Button size="small" icon={<ReloadOutlined />} onClick={() => void load()} />}
+    >
+      <Typography.Title level={5} style={{ marginTop: 0 }}>已信任设备</Typography.Title>
+      <Paragraph type="secondary" style={{ fontSize: 13 }}>
+        收到新设备提醒后来这里核对。认识的留着，不认识的点「移除」并立刻改密码。
+      </Paragraph>
+      <Table
+        rowKey="id"
+        size="small"
+        columns={deviceColumns}
+        dataSource={devices}
+        pagination={false}
+        scroll={{ x: 780 }}
+        locale={{ emptyText: '还没有记录（下次登录会写入）' }}
       />
 
-      <Space direction="vertical" size={20} style={{ width: '100%' }}>
-        <div>
-          <Space align="center">
-            <Switch
-              checked={confirmOn}
-              loading={saving}
-              onChange={(v) => void patch({ confirm_disabled: !v })}
-            />
-            <Text strong>敏感操作需要再输一次密码</Text>
-          </Space>
-          <Paragraph type="secondary" style={{ margin: '6px 0 0 44px', fontSize: 13 }}>
-            覆盖：新建/修改上游平台、人工调整买家余额、查看卡密明文。
-            确认一次 10 分钟内有效，不用每次都输。
-            关掉后，拿到你已登录浏览器的人可以直接改凭证、调余额、导出卡密。
-          </Paragraph>
-        </div>
-
-        <div>
-          <Space align="center">
-            <Switch
-              checked={alertOn}
-              loading={saving}
-              onChange={(v) => void patch({ login_alert_disabled: !v })}
-            />
-            <Text strong>新 IP 登录后台时通知我</Text>
-          </Space>
-          <Paragraph type="secondary" style={{ margin: '6px 0 0 44px', fontSize: 13 }}>
-            员工账号从没见过的 IP 登录时会推一条告警（站内信 + 已配置的渠道）。
-            每个新 IP 单独推送，不会被聚合窗口合并 —— 否则就看不出是哪个 IP 了。
-            本地回环与内网地址会在文案里注明，避免误判。
-          </Paragraph>
-        </div>
-      </Space>
+      <Typography.Title level={5} style={{ marginTop: 24 }}>登录 IP 历史</Typography.Title>
+      <Paragraph type="secondary" style={{ fontSize: 13 }}>
+        仅用于事后追查。用代理/梯子访问时这一列会很长，属正常现象 ——
+        也正因如此，提醒不按 IP 判定。
+      </Paragraph>
+      <Table
+        rowKey="id"
+        size="small"
+        columns={ipColumns}
+        dataSource={ips}
+        pagination={false}
+        scroll={{ x: 780 }}
+        locale={{ emptyText: '暂无记录' }}
+      />
     </Card>
   );
 }

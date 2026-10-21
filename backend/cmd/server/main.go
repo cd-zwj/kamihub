@@ -334,8 +334,8 @@ func bootstrap(cfg *config.Config) (*deps, error) {
 		})
 	loginWatchSvc := service.NewLoginWatchService(db).
 		WithNotifier(notifier).
-		WithSwitch(func(ctx context.Context) bool {
-			return settings.Security(ctx).LoginAlertOn()
+		WithMode(func(ctx context.Context) string {
+			return settings.Security(ctx).LoginAlertMode
 		})
 
 	// ---------- 提货页渲染（仅 api 需要）----------

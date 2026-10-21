@@ -595,12 +595,40 @@ export interface SecuritySettings {
   // ---------- 迭代 5：S2 / S3（同样是反向字段）----------
   /** 关闭「敏感操作二次确认」（默认 false = 要求确认） */
   confirm_disabled: boolean;
-  /** 关闭「新 IP 登录提醒」（默认 false = 提醒） */
-  login_alert_disabled: boolean;
+  /**
+   * 新登录提醒的判定方式：
+   *   device —— 按浏览器设备（默认，推荐：用梯子换 IP 不会误报）
+   *   ip     —— 按 IP（仅适合固定出口 IP）
+   *   off    —— 只记录不提醒
+   */
+  login_alert_mode: 'device' | 'ip' | 'off' | string;
 }
 
-export interface AllSettings {
-  contact: ContactSettings;
+// ---------- 迭代 5：已信任设备与登录 IP ----------
+
+/** 一台已被信任的浏览器（设备标识存后端哈希，前端看不到原值） */
+export interface TrustedDevice {
+  id: number;
+  label: string;
+  user_agent: string;
+  first_ip: string;
+  last_ip: string;
+  first_seen_at: string;
+  last_seen_at: string;
+  hit_count: number;
+}
+
+/** 一条登录 IP 记录，仅用于事后追查（用梯子时会很长） */
+export interface LoginIPRecord {
+  id: number;
+  ip: string;
+  user_agent: string;
+  first_seen_at: string;
+  last_seen_at: string;
+  hit_count: number;
+}
+
+export interface AllSettings {  contact: ContactSettings;
   brand: BrandSettings;
   delivery_page: DeliveryPageSettings;
   security: SecuritySettings;

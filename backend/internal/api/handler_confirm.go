@@ -88,7 +88,63 @@ func (h *Handlers) confirmStatus(c *gin.Context) {
 	})
 }
 
-// requireConfirm 校验请求头里的二次确认票据。
+// ---------- 已信任设备（S3 配套）----------
+
+// listMyDevices 列出当前账号已信任的浏览器。
+//
+// 让站长能自己核对「这些设备我都认识吗」——
+// 只有能查、能删，告警才有闭环：收到提醒 → 来这看一眼 → 不认识的删掉。
+func (h *Handlers) listMyDevices(c *gin.Context) {
+	user := CurrentUser(c)
+	if user == nil {
+		Unauthorized(c, "请先登录")
+		return
+	}
+	if h.loginWatch == nil {
+		ServerError(c, "登录监控服务未启用")
+		return
+	}
+	devices, err := h.loginWatch.Devices(c.Request.Context(), user.ID, 50)
+	if err != nil {
+		ServerError(c, "查询设备失败")
+		return
+	}
+	ips, err := h.loginWatch.IPHistory(c.Request.Context(), user.ID, 30)
+	if err != nil {
+		ServerError(c, "查询登录 IP 失败")
+		return
+	}
+	OK(c, gin.H{
+		"devices": devices,
+		"ips":     ips,
+	})
+}
+
+// forgetMyDevice 移除一台已信任设备。
+//
+// 典型用途：电脑卖掉/丢了、借别人用过、或在告警里看到不认识的设备。
+// 删掉后那台浏览器下次登录会重新触发一次提醒。
+func (h *Handlers) forgetMyDevice(c *gin.Context) {
+	user := CurrentUser(c)
+	if user == nil {
+		Unauthorized(c, "请先登录")
+		return
+	}
+	id, ok := uintParam(c, "id")
+	if !ok {
+		return
+	}
+	if h.loginWatch == nil {
+		ServerError(c, "登录监控服务未启用")
+		return
+	}
+	if err := h.loginWatch.ForgetDevice(c.Request.Context(), user.ID, id); err != nil {
+		ServerError(c, "移除设备失败")
+		return
+	}
+	h.auditLog(c, "auth.device_forgotten", "user", user.Username, gin.H{"device_id": id})
+	OK(c, gin.H{"message": "已移除，该设备下次登录会重新提醒"})
+}
 //
 // 返回 false 时已经写好了响应，调用方直接 return 即可。
 // 用 428 Precondition Required 而不是 403：

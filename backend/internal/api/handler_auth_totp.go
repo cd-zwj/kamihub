@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -132,19 +133,43 @@ func (h *Handlers) login(c *gin.Context) {
 	OK(c, h.loginOKPayload(c, issued, user))
 }
 
-// watchLogin 记录登录 IP，并在首次见到该 IP 时推告警。
+// watchLogin 记录登录的设备与 IP，并在首次见到该设备时推告警。
 //
 // 两个入口都要调：密码登录（未开 2FA）与 2FA 收尾登录。
 // 漏掉任何一个都会让「开了 2FA 的站长被异地登录」这类最该报的情况静默掉。
+//
+// 判定依据是浏览器 Cookie 而不是 IP：站长常用代理访问后台，
+// 出口 IP 每次不同，按 IP 判会把他自己淹掉。
 func (h *Handlers) watchLogin(c *gin.Context, user *models.User) {
 	if h.loginWatch == nil || user == nil {
 		return
 	}
-	// 只盯员工账号：买家换 IP 是常态，报了只会淹没真正的异常
+	// 只盯员工账号：买家换设备/换网络是常态，报了只会淹没真正的异常
 	if !user.IsAdmin() && user.Role != models.RoleOperator {
 		return
 	}
-	h.loginWatch.Record(c.Request.Context(), user, c.ClientIP(), c.Request.UserAgent())
+
+	deviceID, _ := c.Cookie(service.DeviceCookieName)
+	res := h.loginWatch.Record(
+		c.Request.Context(), user, c.ClientIP(), c.Request.UserAgent(), deviceID,
+	)
+
+	// 需要下发新设备标识时写回 Cookie。
+	// HttpOnly：页面脚本读不到，降低被 XSS 偷走的风险。
+	// Path=/api：只在接口请求时携带，不出现在静态资源与提货页请求里。
+	// Secure 只在生产开：本地用 http 调试时带上 Secure 会导致 Cookie 被浏览器丢弃。
+	if res.DeviceID != "" {
+		c.SetSameSite(http.SameSiteLaxMode)
+		c.SetCookie(
+			service.DeviceCookieName,
+			res.DeviceID,
+			int(service.DeviceCookieTTL.Seconds()),
+			"/api",
+			"",
+			h.cfg.IsProduction(),
+			true,
+		)
+	}
 }
 
 // loginOKPayload 统一构造「登录成功」的响应体。

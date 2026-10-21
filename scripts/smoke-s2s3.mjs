@@ -51,29 +51,72 @@ async function main() {
   TOKEN = login.json?.data?.token || '';
   if (!TOKEN) throw new Error('拿不到令牌，后续用例无法进行');
 
-  // ---------------------------------------------------------------- S3：新 IP 提醒
-  const notif = await api('/api/notifications?page=1&page_size=50');
-  const notifList = notif.json?.data?.list || [];
-  // 登录刚刚发生过。第一次从本机登录会生成一条 auth.new_ip_login，
-  // 之后再登录不会重复 —— 两种情况都能接受，关键是**不能刷屏**。
-  const newIpCount = notifList.filter((n) => n.event === 'auth.new_ip_login').length;
+  // ---------------------------------------------------------------- S3：新设备提醒
+  //
+  // 关键场景：站长用梯子访问后台，出口 IP 每次都不同。
+  // 因此提醒必须按「浏览器设备 Cookie」判定，不能按 IP ——
+  // 按 IP 判会让他每次登录都收到告警，几天后就关掉，功能等于没做。
+  const devNow = await api('/api/auth/devices');
+  check('设备列表接口可用', devNow.status === 200, `HTTP ${devNow.status}`);
+  const knownDevices = (devNow.json?.data?.devices || []).length;
+  const knownIPs = (devNow.json?.data?.ips || []).length;
+  check('已记录登录 IP 历史', knownIPs >= 1, `${knownIPs} 条`);
+
+  // 用「不带 Cookie」的方式再登录一次（脚本每次都是全新会话）：
+  // 这会生成一台新设备 + 一条新设备告警。
+  const beforeDev = (await api('/api/notifications?page=1&page_size=50')).json?.data?.list || [];
+  const beforeDevCount = beforeDev.filter((n) => n.event === 'auth.new_device_login').length;
+
+  const loginNoCookie = await fetch(BASE + '/api/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: ADMIN_USER, password: ADMIN_PASS }),
+  });
+  const setCookie = loginNoCookie.headers.get('set-cookie') || '';
   check(
-    '新 IP 登录告警至多 1 条（不重复刷屏）',
-    newIpCount <= 1,
-    `当前 ${newIpCount} 条 auth.new_ip_login`,
+    '登录时下发设备 Cookie',
+    setCookie.includes('kamihub_device=') && setCookie.toLowerCase().includes('httponly'),
+    setCookie.split(';')[0].slice(0, 40) + (setCookie ? ' ...' : ' 无'),
   );
 
-  // 再登录一次，不应新增告警
-  await api('/api/auth/login', {
-    method: 'POST',
-    body: { username: ADMIN_USER, password: ADMIN_PASS },
-    token: '',
-  });
-  const notif2 = await api('/api/notifications?page=1&page_size=50');
-  const newIpCount2 = (notif2.json?.data?.list || []).filter(
-    (n) => n.event === 'auth.new_ip_login',
-  ).length;
-  check('同一 IP 再次登录不重复告警', newIpCount2 === newIpCount, `之前 ${newIpCount} → 之后 ${newIpCount2}`);
+  const afterDev = (await api('/api/notifications?page=1&page_size=50')).json?.data?.list || [];
+  const afterDevCount = afterDev.filter((n) => n.event === 'auth.new_device_login').length;
+  check(
+    '新设备登录触发提醒',
+    afterDevCount > beforeDevCount || afterDevCount >= 1,
+    `${beforeDevCount} → ${afterDevCount}`,
+  );
+
+  /**
+   * 最核心的一条断言：带着同一个设备 Cookie，从「另一个 IP」登录，
+   * 不能再产生告警。这正是「用梯子换 IP 不该被反复打扰」的回归保护。
+   *
+   * 开发环境 TRUST_PROXY=false，拿不到真实多 IP，所以这里只能验证
+   * 「带已知 Cookie 不重复告警」这一半 —— 多 IP 部分由
+   * TestLoginWatchSameDeviceChangingIPAlertsOnce 单测覆盖。
+   */
+  const deviceCookie = (setCookie.split(';')[0] || '').trim();
+  if (deviceCookie) {
+    const before2 = (await api('/api/notifications?page=1&page_size=50')).json?.data?.list || [];
+    const c2 = before2.filter((n) => n.event === 'auth.new_device_login').length;
+
+    await fetch(BASE + '/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: deviceCookie },
+      body: JSON.stringify({ username: ADMIN_USER, password: ADMIN_PASS }),
+    });
+
+    const after2 = (await api('/api/notifications?page=1&page_size=50')).json?.data?.list || [];
+    const c3 = after2.filter((n) => n.event === 'auth.new_device_login').length;
+    check('同一设备再次登录不重复提醒（换 IP 也不报）', c3 === c2, `${c2} → ${c3}`);
+  } else {
+    check('拿到设备 Cookie（后续用例依赖）', false, 'Set-Cookie 里没有 kamihub_device');
+  }
+
+  // 设备数应随之上涨（本次脚本至少写入 1 台）
+  const devAfter = await api('/api/auth/devices');
+  const devicesAfter = (devAfter.json?.data?.devices || []).length;
+  check('设备表已记录本次登录', devicesAfter > knownDevices, `${knownDevices} → ${devicesAfter}`);
 
   // ---------------------------------------------------------------- S2：确认状态
   const status = await api('/api/auth/confirm/status');

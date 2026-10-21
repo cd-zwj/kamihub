@@ -110,9 +110,11 @@ func Migrate(db *gorm.DB) error {
 		&models.PriceTier{},
 		&models.ListingTierPrice{},
 
-		// ---------- 迭代 5：S2 敏感操作确认 / S3 新 IP 登录提醒 ----------
-		// user_login_ips 是新表，用于记住每个员工账号用过的全部 IP。
+		// ---------- 迭代 5：S2 敏感操作确认 / S3 新设备登录提醒 ----------
+		// user_login_ips 记录 IP 历史（仅追查用）；user_devices 存已信任的浏览器。
+		// 告警按 device 判定，不按 IP —— 站长用梯子时出口 IP 每次不同。
 		&models.UserLoginIP{},
+		&models.UserDevice{},
 	)
 }
 

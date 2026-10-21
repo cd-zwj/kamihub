@@ -266,6 +266,9 @@ func (h *Handlers) Register(r *gin.Engine) {
 		// 在 authed 而不是 admin：operator 也要能确认自己的操作。
 		authed.GET("/auth/confirm/status", h.confirmStatus)
 		authed.POST("/auth/confirm", h.confirmSensitive)
+		// 已信任设备：收到「新设备登录」提醒后，来这里核对并删掉不认识的
+		authed.GET("/auth/devices", h.listMyDevices)
+		authed.DELETE("/auth/devices/:id", h.forgetMyDevice)
 
 		authed.GET("/dashboard/stats", h.dashboardStats)
 		// 迭代 4：图表看板数据（一次返回 6 组，避免首屏 6 次请求闪烁）

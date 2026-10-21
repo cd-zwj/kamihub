@@ -5,7 +5,8 @@ import type {
   AdapterMeta, AdminAgentRow, AdminPriceTier, AdminTierPrice, AllSettings, AuditLog, BlacklistEntry,
   CallLog, CaptchaChallenge, CardListResult, CardStats, DashboardCharts, DashboardStats, Delivery, DeliveryView, Envelope,
   Goods, LoginResult, Notification, NotifyStatus, Order, OrderAttempt, PageResult, Platform, ReconcileDiff,
-  RiskHit, RiskRule, StrategyMeta, Supply, TOTPSetupResult, TOTPStatus, User, WorkerTask, WorkerTaskRun,
+  RiskHit, RiskRule, StrategyMeta, Supply, TOTPSetupResult, TOTPStatus, TrustedDevice, LoginIPRecord,
+  User, WorkerTask, WorkerTaskRun,
 } from './types';
 
 const TOKEN_KEY = 'kamihub_token';
@@ -278,6 +279,14 @@ export const api = {
   /** 用密码换一张 10 分钟有效的确认票据 */
   confirmPassword: (password: string) =>
     fetchConfirmTicket(password).then((ticket) => ({ ticket })),
+
+  // ---------- 迭代 5：已信任设备 ----------
+  /** 已信任的浏览器 + 登录过的 IP（收到告警后来这里核对） */
+  myDevices: () =>
+    unwrap<{ devices: TrustedDevice[]; ips: LoginIPRecord[] }>(http.get('/auth/devices')),
+  /** 移除一台设备：那台浏览器下次登录会重新提醒 */
+  forgetDevice: (id: number) =>
+    unwrap<{ message: string }>(http.delete(`/auth/devices/${id}`)),
 
   me: () => unwrap<User>(http.get('/auth/me')),
   logout: () => unwrap<{ message: string }>(http.post('/auth/logout')),

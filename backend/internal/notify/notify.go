@@ -280,6 +280,12 @@ const (
 	// 攻击者第一次登录必然来自一个没见过的 IP。本次登录照常放行，
 	// 只提醒（新 IP 里绝大多数是本人换了网络）。
 	EventLoginNewIP = "auth.new_ip_login"
+	// EventLoginNewDevice 员工账号从一台没见过的浏览器登录。
+	//
+	// 这是判定「账号被盗用」更可靠的信号：它不看 IP，
+	// 所以站长用代理/梯子换出口 IP 不会误报；
+	// 而攻击者在他自己的电脑上登录必然没有你的浏览器 Cookie，一定会报。
+	EventLoginNewDevice = "auth.new_device_login"
 )
 
 // 买家通知事件
