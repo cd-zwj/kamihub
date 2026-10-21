@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from 'react';
+import { Suspense, lazy, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Button, Card, Col, Row, Tooltip, message } from 'antd';
+import { Button, Card, Col, Row, Spin, Tooltip, message } from 'antd';
 import {
   ArrowRightOutlined, CheckCircleOutlined, ExclamationCircleOutlined, LinkOutlined,
   ReloadOutlined, ShoppingCartOutlined, ThunderboltOutlined, WarningOutlined,
@@ -9,6 +9,17 @@ import { api } from '@/api/client';
 import { ORDER_STATUS_TEXT, type DashboardStats } from '@/api/types';
 import { yuan } from '@/utils/format';
 import { EmptyState, MetricBar, PageHeader, StatusTag, TableSkeleton, toneOf } from '@/admin/ui';
+
+/**
+ * 经营分析（多图看板）按需加载。
+ *
+ * 这一段会引 recharts（+130KB gzip），只有真正滚到/展开时才需要，
+ * 所以单独拆 chunk —— 概览页首屏不为图表库付代价。
+ */
+const DashboardAnalytics = lazy(() => import('@/pages/DashboardAnalytics'));
+
+/** 排行榜类列表默认只显示前 N 条，避免平台多时把页面撑成几千像素 */
+const TOP_N = 8;
 
 /**
  * 概览页（设计系统 §4.6 / §5 P1-6）。
@@ -213,34 +224,54 @@ export default function Dashboard() {
 
         {/* ── 平台分布 ── */}
         <Col xs={24} lg={9}>
-          <Card variant="borderless" title="各平台订单分布">
+          <Card
+            variant="borderless"
+            title="各平台订单分布"
+            extra={
+              platformStats.length > TOP_N ? (
+                <Link className="a-card-extra" to="/admin/platforms">
+                  查看全部 {platformStats.length} 个
+                </Link>
+              ) : undefined
+            }
+          >
             {platformStats.length === 0 ? (
               <EmptyState text="还没有配置平台" />
             ) : (
               <div className="a-rank">
-                {platformStats.map((p) => {
-                  const pct =
-                    p.total > 0 ? Math.round((p.delivered / p.total) * 100) : 0;
-                  return (
-                    <div className="a-rank-row" key={p.platform_id}>
-                      <div className="a-rank-label">
-                        <span className="a-rank-name">{p.name}</span>
-                        <span className="a-rank-num a-num">
-                          {p.delivered} / {p.total}
-                        </span>
+                {/* 只显示订单量最高的前 N 个：平台多的站点直接把整页撑到几千像素，
+                    会把下面的「订单状态分布」挤出屏幕，反而看不到重点。 */}
+                {[...platformStats]
+                  .sort((a, b) => b.total - a.total)
+                  .slice(0, TOP_N)
+                  .map((p) => {
+                    const pct =
+                      p.total > 0 ? Math.round((p.delivered / p.total) * 100) : 0;
+                    return (
+                      <div className="a-rank-row" key={p.platform_id}>
+                        <div className="a-rank-label">
+                          <span className="a-rank-name">{p.name}</span>
+                          <span className="a-rank-num a-num">
+                            {p.delivered} / {p.total}
+                          </span>
+                        </div>
+                        <div className="a-rank-track">
+                          <div
+                            className="a-rank-fill"
+                            style={{
+                              width: `${pct}%`,
+                              background:
+                                pct >= 90
+                                  ? 'var(--a-success)'
+                                  : pct >= 70
+                                    ? 'var(--a-warning)'
+                                    : 'var(--a-danger)',
+                            }}
+                          />
+                        </div>
                       </div>
-                      <div className="a-rank-track">
-                        <div
-                          className="a-rank-fill"
-                          style={{
-                            width: `${pct}%`,
-                            background: pct >= 90 ? 'var(--a-success)' : pct >= 70 ? 'var(--a-warning)' : 'var(--a-danger)',
-                          }}
-                        />
-                      </div>
-                    </div>
-                  );
-                })}
+                    );
+                  })}
               </div>
             )}
           </Card>
@@ -266,6 +297,19 @@ export default function Dashboard() {
           </div>
         )}
       </Card>
+
+      {/* ── 经营分析：多图看板（懒加载，来自开发主线的迭代 4）── */}
+      <Suspense
+        fallback={
+          <Card variant="borderless" style={{ marginTop: 16 }}>
+            <div style={{ padding: 40, textAlign: 'center' }}>
+              <Spin />
+            </div>
+          </Card>
+        }
+      >
+        <DashboardAnalytics />
+      </Suspense>
     </>
   );
 }

@@ -19,17 +19,41 @@ const lightTheme: ThemeConfig = buildAdminTheme();
 /**
  * 暗色 = 同一套设计系统令牌 + antd 内置 darkAlgorithm。
  *
- * 不手写一套暗色色板：那是「做完整设计系统」的工作量，
- * 单店内部系统用 antd 算法最省心，且能保证暗色下对比度可用。
+ * 关键点：必须先把设计系统里**写死的颜色类 token 删掉**，再交给 darkAlgorithm 推导。
+ * buildAdminTheme() 的 token 里钉着 colorBgContainer / colorText / colorBorder 等
+ * 亮色值，如果原样展开在 algorithm 之后，antd 的暗色推导会被这些显式值直接覆盖 ——
+ * 表现就是「切了暗色，页面底色变了，但卡片还是白的」。
+ *
+ * 只保留非颜色类 token（圆角/字体/密度/主色种子），颜色一律让算法算。
  */
-const darkTheme: ThemeConfig = {
-  ...buildAdminTheme(),
-  algorithm: antdTheme.darkAlgorithm,
-  token: {
-    ...buildAdminTheme().token,
-    colorBgLayout: '#0f1115',
-  },
-};
+function buildDarkTheme(): ThemeConfig {
+  const base = buildAdminTheme();
+  const {
+    colorText,
+    colorTextSecondary,
+    colorTextTertiary,
+    colorTextQuaternary,
+    colorTextHeading,
+    colorBgLayout,
+    colorBgContainer,
+    colorBorder,
+    colorBorderSecondary,
+    colorLink,
+    ...nonColorToken
+  } = base.token ?? {};
+
+  return {
+    ...base,
+    algorithm: antdTheme.darkAlgorithm,
+    token: {
+      ...nonColorToken,
+      // 布局底色跟 styles.css 里 --bg-page 的暗色值保持一致，避免「外框黑、内容区灰」
+      colorBgLayout: '#0f1115',
+    },
+  };
+}
+
+const darkTheme: ThemeConfig = buildDarkTheme();
 
 type Mode = 'light' | 'dark';
 
