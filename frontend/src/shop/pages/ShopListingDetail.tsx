@@ -24,6 +24,7 @@ import {
 import { InsufficientFundsError, shopApi } from '@/shop/api/shopClient';
 import type { ShopListing, ShopPurchaseResult } from '@/shop/api/shopClient';
 import { useShopAuth } from '@/shop/auth/ShopAuthContext';
+import StockTag, { isSoldOut } from '@/shop/components/StockTag';
 import { formatMoney } from '@/shop/layout/ShopLayout';
 
 const { Title, Text, Paragraph } = Typography;
@@ -67,7 +68,7 @@ export default function ShopListingDetail() {
   const total = item ? Number(item.sale_price) * qty : 0;
   const balance = Number(buyer?.balance ?? 0);
   const notEnough = buyer ? balance < total : false;
-  const soldOut = item?.stock === 0;
+  const soldOut = item ? isSoldOut(item.stock, item.stock_exact) : false;
 
   const handleBuy = async () => {
     if (!buyer) {
@@ -217,7 +218,15 @@ export default function ShopListingDetail() {
             {item.subtitle && <Paragraph type="secondary">{item.subtitle}</Paragraph>}
 
             <Space size={8} style={{ marginBottom: 12 }}>
-              {soldOut ? <Tag color="default">暂时缺货</Tag> : item.stock > 0 ? <Tag color="green">库存 {item.stock}</Tag> : <Tag color="blue">库存充足</Tag>}
+              {soldOut ? (
+                <Tag color="default">暂时缺货</Tag>
+              ) : (
+                <StockTag
+                  stock={item.stock}
+                  stockExact={item.stock_exact}
+                  stockUpdatedAt={item.stock_updated_at}
+                />
+              )}
               {item.sold_count > 0 && <Tag>已售 {item.sold_count}</Tag>}
             </Space>
 

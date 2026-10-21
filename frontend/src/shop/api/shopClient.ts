@@ -99,8 +99,19 @@ export interface ShopListing {
   min_qty: number;
   max_qty: number;
   sold_count: number;
-  /** -1 表示上游代发、库存需实时询价 */
+  /**
+   * 可售库存：
+   *  - 自有卡密：卡池真实张数
+   *  - 上游代发：各货源库存缓存之和
+   *  - 混合：卡池真实张数 + 上游缓存之和
+   * -1 表示「未知/不限」（上游不给确切数字），不要当成缺货。
+   */
   stock: number;
+  /** 库存是否为精确值：true 时 stock===0 才是真的卖不了 */
+  stock_exact: boolean;
+  /** 上游库存缓存的最旧同步时间；纯卡密池模式为 null。用于显示「数据更新于 X 分钟前」 */
+  stock_updated_at?: string | null;
+  /** 1=自有卡密 2=上游代发 3=混合 */
   stock_mode: number;
 }
 

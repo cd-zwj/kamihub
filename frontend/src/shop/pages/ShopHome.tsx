@@ -4,6 +4,7 @@ import { Card, Col, Empty, Input, Row, Skeleton, Space, Tag, Typography, message
 import { SearchOutlined, ShoppingOutlined } from '@ant-design/icons';
 import { shopApi } from '@/shop/api/shopClient';
 import type { ShopListing } from '@/shop/api/shopClient';
+import StockTag, { isSoldOut } from '@/shop/components/StockTag';
 import { formatMoney } from '@/shop/layout/ShopLayout';
 
 const { Title, Text, Paragraph } = Typography;
@@ -66,7 +67,7 @@ export default function ShopHome() {
       ) : (
         <Row gutter={[16, 16]}>
           {list.map((item) => {
-            const soldOut = item.stock === 0;
+            const soldOut = isSoldOut(item.stock, item.stock_exact);
             return (
               <Col key={item.id} xs={24} sm={12} lg={8} xl={6}>
                 <Card
@@ -103,10 +104,12 @@ export default function ShopHome() {
                       </Text>
                       {soldOut ? (
                         <Tag color="default">缺货</Tag>
-                      ) : item.stock > 0 ? (
-                        <Tag color="green">库存 {item.stock}</Tag>
                       ) : (
-                        <Tag color="blue">充足</Tag>
+                        <StockTag
+                          stock={item.stock}
+                          stockExact={item.stock_exact}
+                          stockUpdatedAt={item.stock_updated_at}
+                        />
                       )}
                     </div>
 

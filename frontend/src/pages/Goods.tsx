@@ -17,9 +17,10 @@ import { useAuth } from '@/auth/AuthContext';
 import CardPoolDrawer from '@/components/CardPoolDrawer';
 import ImageUploader from '@/components/ImageUploader';
 
-/** 供货方式：向上游平台采购（默认） / 用商品自带的卡密池发货 */
+/** 供货方式：向上游平台采购（默认） / 用商品自带的卡密池发货 / 两者混合 */
 const STOCK_MODE_UPSTREAM = 1;
 const STOCK_MODE_LOCAL = 2;
+const STOCK_MODE_HYBRID = 3;
 
 export default function GoodsPage() {
   const { isAdmin } = useAuth();
@@ -44,6 +45,9 @@ export default function GoodsPage() {
   // useWatch 此时返回 undefined；下面按 stockMode === STOCK_MODE_LOCAL 判断，
   // 若某处漏了兜底就会把「自有卡密」误判成「上游采购」，整块表单渲染成错的那套。
   const stockMode = Form.useWatch('stock_mode', form) ?? STOCK_MODE_UPSTREAM;
+  // 混合模式的两个通道开关：既吃卡密池也走上游
+  const usesCardPool = stockMode === STOCK_MODE_LOCAL || stockMode === STOCK_MODE_HYBRID;
+  const usesUpstream = stockMode === STOCK_MODE_UPSTREAM || stockMode === STOCK_MODE_HYBRID;
 
   // 卡密池抽屉（仅自建商品用）
   const [cardGoods, setCardGoods] = useState<Goods | null>(null);
@@ -111,6 +115,8 @@ export default function GoodsPage() {
       cost_price: 0,
       // 撤销订单时卡密的默认去向：默认不退回，保守取值。
       return_card_on_cancel: false,
+      // 混合模式默认池子优先：池子里的货是已付过钱的沉没成本，先清掉
+      local_stock_first: true,
     });
     setOpen(true);
   }
@@ -135,6 +141,7 @@ export default function GoodsPage() {
       max_supply_price: Number(row.max_supply_price ?? 0),
       extra_template: row.extra_template,
       stock_mode: row.stock_mode ?? STOCK_MODE_UPSTREAM,
+      local_stock_first: row.local_stock_first ?? true,
       cost_price: Number(row.cost_price ?? 0),
       usage_instruction: row.usage_instruction ?? '',
       return_card_on_cancel: row.return_card_on_cancel ?? false,
@@ -439,17 +446,34 @@ export default function GoodsPage() {
             {
               // 供货方式决定了这个商品是怎么发货的，摆在最前面
               title: '供货方式',
-              width: 120,
-              render: (_, r) =>
-                (r.stock_mode ?? STOCK_MODE_UPSTREAM) === STOCK_MODE_LOCAL ? (
-                  <Tooltip title="卡密存在你自己这里，卖出后从卡密池直接发货，不经过任何上游平台">
-                    <Tag color="purple" style={{ cursor: 'help' }}>
-                      {STOCK_MODE_TEXT[2]}
-                    </Tag>
-                  </Tooltip>
-                ) : (
-                  <Tag>{STOCK_MODE_TEXT[1]}</Tag>
-                ),
+              width: 130,
+              render: (_, r) => {
+                const mode = r.stock_mode ?? STOCK_MODE_UPSTREAM;
+                if (mode === STOCK_MODE_LOCAL) {
+                  return (
+                    <Tooltip title="卡密存在你自己这里，卖出后从卡密池直接发货，不经过任何上游平台">
+                      <Tag color="purple" style={{ cursor: 'help' }}>
+                        {STOCK_MODE_TEXT[2]}
+                      </Tag>
+                    </Tooltip>
+                  );
+                }
+                if (mode === STOCK_MODE_HYBRID) {
+                  return (
+                    <Tooltip
+                      title={
+                        `卡密池与上游都算货；当前${r.local_stock_first ? '卡密池优先' : '上游优先'}。` +
+                        '池子够就整单发卡密池，不够才去上游买，一笔订单不拆单。'
+                      }
+                    >
+                      <Tag color="geekblue" style={{ cursor: 'help' }}>
+                        {STOCK_MODE_TEXT[3]}
+                      </Tag>
+                    </Tooltip>
+                  );
+                }
+                return <Tag>{STOCK_MODE_TEXT[1]}</Tag>;
+              },
             },
             {
               // 自建商品看的不是「最高供应价」而是「可售卡密」，
@@ -457,7 +481,8 @@ export default function GoodsPage() {
               title: '成本 / 库存',
               width: 150,
               render: (_, r) => {
-                if ((r.stock_mode ?? STOCK_MODE_UPSTREAM) === STOCK_MODE_LOCAL) {
+                const mode = r.stock_mode ?? STOCK_MODE_UPSTREAM;
+                if (mode === STOCK_MODE_LOCAL || mode === STOCK_MODE_HYBRID) {
                   const avail = r.card_available ?? 0;
                   const total = r.card_total ?? 0;
                   return (
@@ -465,9 +490,15 @@ export default function GoodsPage() {
                       <Tooltip title={`单条成本 ${yuan(r.cost_price)}，毛利按售价减成本算`}>
                         <span style={{ cursor: 'help' }}>成本 {yuan(r.cost_price)}</span>
                       </Tooltip>
-                      <Tooltip title={`卡密池：可售 ${avail} / 合计 ${total}`}>
+                      <Tooltip
+                        title={
+                          mode === STOCK_MODE_HYBRID
+                            ? `卡密池：可售 ${avail} / 合计 ${total}。混合模式下还会加上游货源的库存`
+                            : `卡密池：可售 ${avail} / 合计 ${total}`
+                        }
+                      >
                         <Tag color={avail > 0 ? 'success' : 'error'} style={{ cursor: 'help' }}>
-                          可售 {avail}
+                          池子 {avail}
                         </Tag>
                       </Tooltip>
                     </Space>
@@ -493,8 +524,9 @@ export default function GoodsPage() {
               title: '选货策略',
               width: 170,
               render: (_, r) => {
+                const mode = r.stock_mode ?? STOCK_MODE_UPSTREAM;
                 // 自有卡密商品没有「选货」这回事，显示策略只会误导运营
-                if ((r.stock_mode ?? STOCK_MODE_UPSTREAM) === STOCK_MODE_LOCAL) {
+                if (mode === STOCK_MODE_LOCAL) {
                   return <Typography.Text type="secondary">不适用</Typography.Text>;
                 }
                 const s = strategies.find((x) => x.name === r.routing_strategy);
@@ -525,44 +557,57 @@ export default function GoodsPage() {
               title: '货源',
               width: 110,
               render: (_, r) => {
-                if ((r.stock_mode ?? STOCK_MODE_UPSTREAM) === STOCK_MODE_LOCAL) {
+                const mode = r.stock_mode ?? STOCK_MODE_UPSTREAM;
+                if (mode === STOCK_MODE_LOCAL) {
                   return <Typography.Text type="secondary">卡密池</Typography.Text>;
                 }
                 const n = r.supplies?.length ?? 0;
+                if (mode === STOCK_MODE_HYBRID) {
+                  // 混合模式：货源不是唯一来源，没配也能靠池子卖，所以不用 warning
+                  return n > 0 ? (
+                    <Tag color="green">{n} 个 + 池子</Tag>
+                  ) : (
+                    <Tag>仅池子</Tag>
+                  );
+                }
                 return n > 0 ? <Tag color="green">{n} 个</Tag> : <Tag color="warning">未配置</Tag>;
               },
             },
             {
               title: '操作',
-              width: 230,
+              width: 270,
               fixed: 'right',
-              render: (_, r) => (
-                <Space size={4}>
-                  {(r.stock_mode ?? STOCK_MODE_UPSTREAM) === STOCK_MODE_LOCAL ? (
-                    <Button size="small" type="link" onClick={() => setCardGoods(r)}>
-                      卡密池
-                    </Button>
-                  ) : (
-                    <Button size="small" type="link" onClick={() => void openSupplies(r)}>
-                      货源管理
-                    </Button>
-                  )}
-                  {isAdmin && (
-                    <>
-                      <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(r)} />
-                      <Popconfirm
-                        title="确认删除该商品？"
-                        description="已有订单的商品不能删除，请改为下架。"
-                        onConfirm={() => void remove(r)}
-                        okText="删除"
-                        cancelText="取消"
-                      >
-                        <Button size="small" danger icon={<DeleteOutlined />} />
-                      </Popconfirm>
-                    </>
-                  )}
-                </Space>
-              ),
+              render: (_, r) => {
+                const mode = r.stock_mode ?? STOCK_MODE_UPSTREAM;
+                return (
+                  <Space size={4}>
+                    {(mode === STOCK_MODE_LOCAL || mode === STOCK_MODE_HYBRID) && (
+                      <Button size="small" type="link" onClick={() => setCardGoods(r)}>
+                        卡密池
+                      </Button>
+                    )}
+                    {(mode === STOCK_MODE_UPSTREAM || mode === STOCK_MODE_HYBRID) && (
+                      <Button size="small" type="link" onClick={() => void openSupplies(r)}>
+                        货源管理
+                      </Button>
+                    )}
+                    {isAdmin && (
+                      <>
+                        <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(r)} />
+                        <Popconfirm
+                          title="确认删除该商品？"
+                          description="已有订单的商品不能删除，请改为下架。"
+                          onConfirm={() => void remove(r)}
+                          okText="删除"
+                          cancelText="取消"
+                        >
+                          <Button size="small" danger icon={<DeleteOutlined />} />
+                        </Popconfirm>
+                      </>
+                    )}
+                  </Space>
+                );
+              },
             },
           ]}
         />
@@ -590,19 +635,32 @@ export default function GoodsPage() {
           initialValues={{ stock_mode: STOCK_MODE_UPSTREAM }}
         >
           {/* 供货方式是这套表单的总开关：上游商品要配货源路由，
-              自建商品要贴卡密 + 写使用说明，两套字段互斥，不能同时显示 */}
+              卡密池商品要贴卡密 + 写使用说明，混合模式两套都要显示 */}
           <Form.Item
             name="stock_mode"
             label="供货方式"
-            extra="上游采购：下单时去卡密平台买。自有卡密：卡密已在你自己手里，卖出后从卡密池直接发。"
+            extra="上游采购：下单时去卡密平台买。自有卡密：卡密已在你自己手里，卖出后从卡密池直接发。卡密池+上游：两边都算货，池子里有退货卡密也不会卖不出去。"
           >
             <Select
               options={[
                 { value: STOCK_MODE_UPSTREAM, label: '上游采购（挂平台货源，自动比价/故障转移）' },
                 { value: STOCK_MODE_LOCAL, label: '自有卡密（自己导入卡密，不依赖任何平台）' },
+                {
+                  value: STOCK_MODE_HYBRID,
+                  label: '卡密池 + 上游（两边都算货，退货卡密也能卖出去）',
+                },
               ]}
             />
           </Form.Item>
+          {stockMode === STOCK_MODE_HYBRID && (
+            <Alert
+              type="info"
+              showIcon
+              style={{ marginBottom: 12 }}
+              message="混合模式：一笔订单只从一个通道取货，绝不拆单"
+              description="池子够就整单发卡密池，不够就整单去上游买（不拆成「池子发几张 + 上游买几张」）。这样退款、作废、卡密归属都是清楚的。"
+            />
+          )}
           <Space size={12} style={{ display: 'flex' }} wrap>
             <Form.Item
               name="code"
@@ -659,7 +717,7 @@ export default function GoodsPage() {
             <Form.Item name="max_quantity" label="单次数量上限" style={{ width: 150 }}>
               <InputNumber min={1} max={10000} style={{ width: '100%' }} />
             </Form.Item>
-            {stockMode !== STOCK_MODE_LOCAL && (
+            {usesUpstream && (
               <Form.Item
                 name="max_supply_price"
                 label="最高供应价(元)"
@@ -680,9 +738,9 @@ export default function GoodsPage() {
             )}
           </Space>
 
-          {stockMode === STOCK_MODE_LOCAL ? (
+          {usesCardPool && (
             <>
-              {/* ---------------- 自有卡密商品 ---------------- */}
+              {/* ---------------- 卡密池通道（自有卡密 / 混合） ---------------- */}
               <Typography.Text strong style={{ fontSize: 13 }}>
                 卡密与使用说明
               </Typography.Text>
@@ -690,9 +748,32 @@ export default function GoodsPage() {
                 type="success"
                 showIcon
                 style={{ margin: '8px 0' }}
-                message="这类商品的库存就是卡密池里的卡密"
-                description="下单后系统自动取一条卡密发出。保存后可在列表里点「卡密池」导入卡密、查看已售记录。"
+                message={
+                  stockMode === STOCK_MODE_HYBRID
+                    ? '混合模式下，卡密池里的卡密也算可售库存'
+                    : '这类商品的库存就是卡密池里的卡密'
+                }
+                description={
+                  stockMode === STOCK_MODE_HYBRID
+                    ? '池子够就整单发池子（退货/自采的卡密终于能卖出去），不够才去上游买。保存后可在列表里点「卡密池」导入卡密。'
+                    : '下单后系统自动取一条卡密发出。保存后可在列表里点「卡密池」导入卡密、查看已售记录。'
+                }
               />
+
+              {stockMode === STOCK_MODE_HYBRID && (
+                <Form.Item
+                  name="local_stock_first"
+                  label="取货顺序"
+                  extra="卡密池优先：先清掉池子里的库存（这部分没有上游成本，毛利更高），池子不够才去上游。上游优先：先买上游，上游全失败才用池子兜底。"
+                >
+                  <Select
+                    options={[
+                      { value: true, label: '卡密池优先（推荐：先清退货库存）' },
+                      { value: false, label: '上游优先（上游全失败时用池子兜底）' },
+                    ]}
+                  />
+                </Form.Item>
+              )}
 
               <Space size={12} wrap>
                 <Form.Item
@@ -736,9 +817,11 @@ export default function GoodsPage() {
                 />
               </Form.Item>
             </>
-          ) : (
+          )}
+
+          {usesUpstream && (
             <>
-              {/* ---------------- 上游采购商品 ---------------- */}
+              {/* ---------------- 上游通道（上游采购 / 混合） ---------------- */}
               <Typography.Text strong style={{ fontSize: 13 }}>
                 货源路由
               </Typography.Text>

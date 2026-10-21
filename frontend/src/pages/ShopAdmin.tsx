@@ -43,8 +43,15 @@ import { api } from '@/api/client';
 import { toastError } from '@/api/client';
 import type { Goods } from '@/api/types';
 import ImageUploader from '@/components/ImageUploader';
+import { agoText, fmtTime } from '@/utils/format';
 
 const { Text, Title } = Typography;
+
+/** 库存同步时间的展示：既要能看懂「多久以前」，也要能查到具体时刻。 */
+function stockSyncText(v?: string | null): string {
+  if (!v) return '尚未同步';
+  return `${agoText(v)}（${fmtTime(v)}）`;
+}
 
 function money(v: string | number | undefined | null): string {
   const n = Number(v ?? 0);
@@ -566,6 +573,7 @@ function ListingsTab() {
         if (!s) return <Text type="secondary">-</Text>;
 
         const isLocal = s.stock_mode === 2;
+        const isHybrid = s.stock_mode === 3;
 
         // 未上架：与缺货是两码事，优先说明
         if (!s.listed) {
@@ -578,13 +586,41 @@ function ListingsTab() {
 
         // 有货源/有卡：正常
         if (!s.reason) {
-          return isLocal ? (
-            <Tag color={s.available > 0 ? 'green' : 'red'}>
-              卡密 {s.available} 张
-            </Tag>
-          ) : (
-            <Tooltip title={`上游代发，已配置 ${s.supply_count} 个货源；库存以上游实时为准`}>
-              <Tag color="blue">上游代发 · {s.supply_count} 货源</Tag>
+          if (isLocal) {
+            return (
+              <Tag color={s.available > 0 ? 'green' : 'red'}>
+                卡密 {s.available} 张
+              </Tag>
+            );
+          }
+          if (isHybrid) {
+            // 混合模式：可售量 = 卡池 + 上游缓存，把新鲜度一起给出来，
+            // 否则运营会以为这个数字是实时的。
+            return (
+              <Tooltip
+                title={
+                  `混合模式（${s.local_stock_first ? '卡密池优先' : '上游优先'}）：` +
+                  `卡密池 + ${s.supply_count} 个货源；` +
+                  `上游库存同步于 ${stockSyncText(s.stock_updated_at)}`
+                }
+              >
+                <Tag color={s.available > 0 ? 'green' : 'red'}>
+                  {s.available > 0 ? `可售 ${s.available}` : '待确认'}
+                </Tag>
+              </Tooltip>
+            );
+          }
+          return (
+            <Tooltip
+              title={
+                `上游代发，已配置 ${s.supply_count} 个货源；库存为缓存值，` +
+                `同步于 ${stockSyncText(s.stock_updated_at)}`
+              }
+            >
+              <Tag color="blue">
+                {s.available > 0 ? `缓存 ${s.available}` : '上游代发'} ·{' '}
+                {s.supply_count} 货源
+              </Tag>
             </Tooltip>
           );
         }

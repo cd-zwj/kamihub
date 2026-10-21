@@ -65,11 +65,20 @@ export interface AdminListing {
 }
 
 export interface AdminListingStock {
-  /** 可售数量；-1 表示上游代发、库存由上游实时决定 */
+  /**
+   * 可售数量：
+   *  - 自有卡密：卡池真实张数
+   *  - 上游代发：各货源库存缓存之和；-1 表示上游不给确切数字
+   *  - 混合：卡池真实张数 + 上游缓存之和
+   */
   available: number;
-  /** 1=上游代发 2=自有卡密 */
+  /** 1=上游代发 2=自有卡密 3=混合 */
   stock_mode: number;
+  /** 混合模式下卡密池是否优先（非混合模式无意义） */
+  local_stock_first: boolean;
   supply_count: number;
+  /** 上游库存缓存最旧的同步时间；纯卡密池模式为 null */
+  stock_updated_at?: string | null;
   /** 缺货原因，有货时为空串 */
   reason: string;
   /** 修复建议 */

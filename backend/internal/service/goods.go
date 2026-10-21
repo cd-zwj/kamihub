@@ -77,7 +77,9 @@ func (s *GoodsService) fillCardStats(ctx context.Context, list []models.Goods) {
 	}
 	ids := make([]uint, 0, len(list))
 	for i := range list {
-		if list[i].IsLocalStock() {
+		// 混合模式也会吃卡密池，漏掉它会让混合商品的卡密数一直显示 0，
+		// 运营会以为「卡密没导进去」，其实只是没统计。
+		if list[i].UsesCardPool() {
 			ids = append(ids, list[i].ID)
 		}
 	}
@@ -133,8 +135,11 @@ type GoodsInput struct {
 
 	// ---------- 自建商品（卡密池）相关 ----------
 
-	// StockMode 供货方式：1=上游采购（默认）2=自带卡密池。
+	// StockMode 供货方式：1=上游采购（默认）2=自带卡密池 3=卡密池+上游混合。
 	StockMode *int `json:"stock_mode"`
+	// LocalStockFirst 混合模式下卡密池是否优先（true=池子优先，false=上游优先）。
+	// 只在 StockMode=3 时有意义；用指针以区分「没传」和「传了 false」。
+	LocalStockFirst *bool `json:"local_stock_first"`
 	// CostPrice 自建商品的单条成本价
 	CostPrice *decimal.Decimal `json:"cost_price"`
 	// UsageInstruction 自建商品的通用使用说明（买家在提货页看到的使用方式）
@@ -200,6 +205,9 @@ func (s *GoodsService) Create(ctx context.Context, in GoodsInput) (*models.Goods
 		MaxQuantity:     1,
 		ExtraTemplate:   in.ExtraTemplate,
 		StockMode:       models.StockModeUpstream,
+		// 混合模式下默认池子优先：池子里是已经付过钱的沉没成本，
+		// 而且是退货/自采进来的，不清掉就一直占着资金。
+		LocalStockFirst: true,
 	}
 	if in.Status != nil {
 		g.Status = *in.Status
@@ -240,7 +248,7 @@ func (s *GoodsService) Create(ctx context.Context, in GoodsInput) (*models.Goods
 	// 建商品时顺手导入卡密。导入失败不回滚商品 ——
 	// 商品已经建好了，卡密可以在卡密池里重贴一次，为此丢掉整个商品更糟。
 	cards := ParseCards(in.InitCards)
-	if g.IsLocalStock() && len(cards) > 0 {
+	if g.UsesCardPool() && len(cards) > 0 {
 		res, ierr := s.cards.Import(ctx, ImportInput{
 			GoodsID:   g.ID,
 			Cards:     cards,
@@ -263,7 +271,7 @@ func (s *GoodsService) Create(ctx context.Context, in GoodsInput) (*models.Goods
 	// 不要再调 s.Get()：那会再查一次商品、再加一次卡密统计聚合，
 	// 而 Create 的返回值只有 handler 用来回 id/name 给前端，
 	// 多这两次查询纯属浪费（前端拿到商品后本来就要单独查卡密池）。
-	if g.IsLocalStock() {
+	if g.UsesCardPool() {
 		g.CardTotal = int64(len(cards))
 		g.CardAvailable = g.CardTotal
 	}
@@ -278,10 +286,13 @@ func (s *GoodsService) Create(ctx context.Context, in GoodsInput) (*models.Goods
 func applySelfHostedFields(g *models.Goods, in GoodsInput) error {
 	if in.StockMode != nil {
 		mode := *in.StockMode
-		if mode != models.StockModeUpstream && mode != models.StockModeLocal {
-			return errors.New("供货方式只能是 1(上游采购) 或 2(自有卡密)")
+		if mode != models.StockModeUpstream && mode != models.StockModeLocal && mode != models.StockModeHybrid {
+			return errors.New("供货方式只能是 1(上游采购)、2(自有卡密) 或 3(卡密池+上游混合)")
 		}
 		g.StockMode = mode
+	}
+	if in.LocalStockFirst != nil {
+		g.LocalStockFirst = *in.LocalStockFirst
 	}
 	if in.CostPrice != nil {
 		if in.CostPrice.IsNegative() {
@@ -350,7 +361,7 @@ func (s *GoodsService) Update(ctx context.Context, id uint, in GoodsInput) (*mod
 	}
 
 	// 自建商品字段。用「非 nil 就写」的语义，让运营能把成本价/说明改回空。
-	if in.StockMode != nil || in.CostPrice != nil || in.UsageInstruction != nil {
+	if in.StockMode != nil || in.LocalStockFirst != nil || in.CostPrice != nil || in.UsageInstruction != nil {
 		// 复用 applySelfHostedFields 做校验，避免 Create/Update 两处规则不一致
 		probe := g
 		if err := applySelfHostedFields(&probe, in); err != nil {
@@ -358,6 +369,9 @@ func (s *GoodsService) Update(ctx context.Context, id uint, in GoodsInput) (*mod
 		}
 		if in.StockMode != nil {
 			updates["stock_mode"] = probe.StockMode
+		}
+		if in.LocalStockFirst != nil {
+			updates["local_stock_first"] = probe.LocalStockFirst
 		}
 		if in.CostPrice != nil {
 			updates["cost_price"] = probe.CostPrice
@@ -377,7 +391,7 @@ func (s *GoodsService) Update(ctx context.Context, id uint, in GoodsInput) (*mod
 		if in.StockMode != nil {
 			mode = *in.StockMode
 		}
-		if mode == models.StockModeLocal {
+		if mode == models.StockModeLocal || mode == models.StockModeHybrid {
 			cost := g.CostPrice.InexactFloat64()
 			if in.CostPrice != nil {
 				cost = in.CostPrice.InexactFloat64()

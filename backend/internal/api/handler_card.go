@@ -115,16 +115,17 @@ func (h *Handlers) importCards(c *gin.Context) {
 		return
 	}
 
-	// 商品必须存在，且必须真的是自建商品 ——
-	// 给上游商品塞卡密没有意义（不会有任何代码去读它），要当场拦住。
+	// 商品必须存在，且必须真的会用卡密池 ——
+	// 给「只走上游」的商品塞卡密没有意义（不会有任何代码去读它），要当场拦住。
+	// 混合模式同样会用池子，所以这里判定的是 UsesCardPool 而不是 IsLocalStock。
 	goods, err := h.goods.Get(c.Request.Context(), goodsID)
 	if err != nil {
 		NotFound(c, "商品不存在")
 		return
 	}
-	if !goods.IsLocalStock() {
+	if !goods.UsesCardPool() {
 		Fail(c, 400, "INVALID_ARGUMENT",
-			"该商品是「上游采购」模式，卡密池不会生效；请先把供货方式改成「自有卡密」")
+			"该商品是「上游采购」模式，卡密池不会生效；请先把供货方式改成「自有卡密」或「卡密池+上游」")
 		return
 	}
 

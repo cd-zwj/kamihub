@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/shopspring/decimal"
 	"gorm.io/gorm"
@@ -53,10 +54,77 @@ type ShopListing struct {
 	MinQty      int             `json:"min_qty"`
 	MaxQty      int             `json:"max_qty"`
 	SoldCount   int64           `json:"sold_count"`
-	// Stock 可售库存：本地卡池的可用数量；上游货源为 -1 表示「不限/需实时询价」
+	// Stock 可售库存：
+	//   - 自有卡密模式：卡池真实可用张数（精确）
+	//   - 上游代发模式：各启用货源库存缓存之和（估算，可能过期）
+	//   - 混合模式：卡池真实张数 + 上游缓存之和
+	// -1 表示「未知/不限」——上游库存拿不到确切数字时不要瞎报 0，
+	// 否则会把明明能卖的商品显示成缺货。
 	Stock int64 `json:"stock"`
-	// StockMode 1=自有卡密 2=上游代发，供前端展示不同的文案
+	// StockExact 库存是否为精确值。
+	//
+	// true  —— 自有卡密（或混合但没有上游货源），Stock 是池子真实张数，0 就是真卖不了
+	// false —— 含上游缓存成分，Stock 是估算值，必须配 StockUpdatedAt 一起展示
+	StockExact bool `json:"stock_exact"`
+	// StockUpdatedAt 上游库存缓存里最旧的一次同步时间（纯卡密池模式为 null）。
+	// C 端据此显示「数据更新于 X 分钟前」，让买家知道这个数字有多新。
+	StockUpdatedAt *time.Time `json:"stock_updated_at"`
+	// StockMode 1=自有卡密 2=上游代发 3=混合，供前端展示不同的文案
 	StockMode int `json:"stock_mode"`
+}
+
+// supplyStock 某个商品在上游侧的库存缓存汇总。
+type supplyStock struct {
+	// Stock 各启用货源库存之和；-1 表示无法确定（有货源报「不限/未知」）
+	Stock int64
+	// SupplyCount 启用中的货源数量
+	SupplyCount int64
+	// SyncedAt 最旧的一次库存同步时间
+	SyncedAt *time.Time
+}
+
+// supplyStockByGoods 批量汇总各商品启用中货源的库存缓存。
+//
+// 三个刻意的设计：
+//  1. 批量查而不是逐个查 —— 列表页一屏 10~20 条，逐条查货源是 N+1。
+//  2. 负库存（上游表示「不限/未知」）不算进求和，而是把整个商品标记为 -1。
+//     把 -1 当数字加进总和会算出个毫无意义的负数。
+//  3. 时间取**最旧**而不是最新。展示给买家的库存是这些货源之和，
+//     整个数字的可信度取决于最陈旧的那一部分；取最新只会制造虚假的新鲜感。
+func (s *ListingService) supplyStockByGoods(ctx context.Context, goodsIDs []uint) (map[uint]supplyStock, error) {
+	out := make(map[uint]supplyStock, len(goodsIDs))
+	if len(goodsIDs) == 0 {
+		return out, nil
+	}
+	rows := []struct {
+		GoodsID  uint
+		N        int64
+		UnknownN int64
+		Cnt      int64
+		SyncedAt *time.Time
+	}{}
+	if err := s.db.WithContext(ctx).Model(&models.Supply{}).
+		Select(`goods_id,
+		        COALESCE(SUM(CASE WHEN stock < 0 THEN 0 ELSE stock END), 0) AS n,
+		        COALESCE(SUM(CASE WHEN stock < 0 THEN 1 ELSE 0 END), 0) AS unknown_n,
+		        COUNT(*) AS cnt,
+		        MIN(stock_synced_at) AS synced_at`).
+		Where("goods_id IN ? AND enabled = ?", goodsIDs, true).
+		Group("goods_id").Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		ss := supplyStock{SupplyCount: r.Cnt, Stock: r.N}
+		if r.UnknownN > 0 {
+			ss.Stock = -1
+		}
+		if r.SyncedAt != nil {
+			t := *r.SyncedAt
+			ss.SyncedAt = &t
+		}
+		out[r.GoodsID] = ss
+	}
+	return out, nil
 }
 
 // ShopListingFilter C 端查询条件
@@ -127,6 +195,21 @@ func (s *ListingService) GetForShop(ctx context.Context, id uint) (*ShopListing,
 // toShopListings 把内部模型转成 C 端视图，并补上库存。
 func (s *ListingService) toShopListings(ctx context.Context, rows []models.Listing) ([]ShopListing, error) {
 	out := make([]ShopListing, 0, len(rows))
+
+	// 一次性把上游货源库存缓存查出来（避免 N+1）
+	goodsIDs := make([]uint, 0, len(rows))
+	seen := map[uint]bool{}
+	for _, r := range rows {
+		if !seen[r.GoodsID] {
+			seen[r.GoodsID] = true
+			goodsIDs = append(goodsIDs, r.GoodsID)
+		}
+	}
+	upstream, err := s.supplyStockByGoods(ctx, goodsIDs)
+	if err != nil {
+		return nil, err
+	}
+
 	for _, r := range rows {
 		item := ShopListing{
 			ID:          r.ID,
@@ -145,18 +228,42 @@ func (s *ListingService) toShopListings(ctx context.Context, rows []models.Listi
 		if r.MinQty <= 0 {
 			item.MinQty = 1
 		}
-		if r.Goods != nil {
-			item.StockMode = r.Goods.StockMode
+		if r.Goods == nil {
+			out = append(out, item)
+			continue
+		}
+		item.StockMode = r.Goods.StockMode
+
+		var pool int64
+		if r.Goods.UsesCardPool() && s.cards != nil {
+			n, cerr := s.cards.CountAvailable(ctx, r.GoodsID)
+			if cerr != nil {
+				return nil, cerr
+			}
+			pool = n
 		}
 
-		// 自有卡密：库存就是卡池可用数量
-		if r.Goods != nil && r.Goods.IsLocalStock() && s.cards != nil {
-			n, err := s.cards.CountAvailable(ctx, r.GoodsID)
-			if err != nil {
-				return nil, err
+		ss := upstream[r.GoodsID]
+		switch {
+		case r.Goods.IsLocalStock():
+			// 自有卡密：库存就是卡池可用张数，精确值
+			item.Stock = pool
+			item.StockExact = true
+
+		case r.Goods.IsHybridStock() && ss.SupplyCount == 0:
+			// 混合但一条货源都没启用：等价于自有卡密，池子说了算
+			item.Stock = pool
+			item.StockExact = true
+
+		default:
+			// 上游 / 混合：可售量 = 上游缓存（+ 混合模式下的池子真实张数）
+			item.Stock = ss.Stock
+			item.StockUpdatedAt = ss.SyncedAt
+			if r.Goods.IsHybridStock() && item.Stock >= 0 {
+				item.Stock += pool
 			}
-			item.Stock = n
 		}
+
 		out = append(out, item)
 	}
 	return out, nil
@@ -236,13 +343,19 @@ func (s *ListingService) ListForAdmin(ctx context.Context, page, size int, keywo
 // 运营根本不知道是卡池空了、没配货源、还是上游缺货 —— 只能来问开发。
 // 这里把判断依据直接算出来，并给出下一步该做什么。
 type StockInfo struct {
-	// Available 可售数量。自有卡密模式是真实张数；
-	// 上游代发模式为 -1（库存由上游实时决定，静态算不出来）。
+	// Available 可售数量。
+	//   - 自有卡密模式：卡池真实张数
+	//   - 上游代发模式：各货源库存缓存之和；-1 表示上游不给确切数字
+	//   - 混合模式：卡池真实张数 + 上游缓存之和
 	Available int64 `json:"available"`
-	// StockMode 1=上游代发 2=自有卡密
+	// StockMode 1=上游代发 2=自有卡密 3=混合
 	StockMode int `json:"stock_mode"`
+	// LocalStockFirst 混合模式下卡密池是否优先（非混合模式无意义）
+	LocalStockFirst bool `json:"local_stock_first"`
 	// SupplyCount 启用中的上游货源数量
 	SupplyCount int64 `json:"supply_count"`
+	// StockUpdatedAt 上游库存缓存最旧的同步时间（纯卡密池模式为 null）
+	StockUpdatedAt *time.Time `json:"stock_updated_at"`
 	// Reason 缺货原因；有货时为空串
 	Reason string `json:"reason"`
 	// Hint 修复建议；有货时为空串
@@ -290,30 +403,25 @@ func (s *ListingService) StockDiagnosis(ctx context.Context, listings []models.L
 		}
 	}
 
-	// 一次性查各商品启用中的货源数
-	supplyCounts := map[uint]int64{}
-	srows := []struct {
-		GoodsID uint
-		N       int64
-	}{}
-	if err := s.db.WithContext(ctx).Model(&models.Supply{}).
-		Select("goods_id, count(*) as n").
-		Where("goods_id IN ? AND enabled = ?", goodsIDs, true).
-		Group("goods_id").Scan(&srows).Error; err != nil {
+	// 一次性查各商品的「货源数 + 库存缓存 + 最旧同步时间」。
+	// 混合模式要用它算合并库存，上游模式要用它给参考值，
+	// 所以不再单独查一次 count，避免两处口径不一致。
+	upstream, err := s.supplyStockByGoods(ctx, goodsIDs)
+	if err != nil {
 		return nil, err
-	}
-	for _, r := range srows {
-		supplyCounts[r.GoodsID] = r.N
 	}
 
 	for _, l := range listings {
+		ss := upstream[l.GoodsID]
 		info := &StockInfo{
-			Listed:      l.IsListed,
-			SupplyCount: supplyCounts[l.GoodsID],
-			PriceZero:   !l.SalePrice.IsPositive(),
+			Listed:         l.IsListed,
+			SupplyCount:    ss.SupplyCount,
+			PriceZero:      !l.SalePrice.IsPositive(),
+			StockUpdatedAt: ss.SyncedAt,
 		}
 		if l.Goods != nil {
 			info.StockMode = l.Goods.StockMode
+			info.LocalStockFirst = l.Goods.LocalStockFirst
 		}
 
 		// 未上架：买家看不到，与缺货是两码事，优先提示
@@ -325,19 +433,46 @@ func (s *ListingService) StockDiagnosis(ctx context.Context, listings []models.L
 			continue
 		}
 
-		if info.StockMode == models.StockModeLocal {
+		pool := cardCounts[l.GoodsID]
+		switch {
+		case l.Goods != nil && l.Goods.IsLocalStock():
 			// 自有卡密：库存就是卡池里的可用张数
-			info.Available = cardCounts[l.GoodsID]
+			info.Available = pool
 			if info.Available == 0 {
 				info.Reason = "自有卡密池已空"
 				info.Hint = "该商品是「自有卡密」模式，不走向上游采购。请到「商品与货源」→ 该商品的卡密池导入卡密"
 			}
-		} else {
-			// 上游代发：库存由上游决定，但没配货源就一定发不出货
-			info.Available = -1
+
+		case l.Goods != nil && l.Goods.IsHybridStock():
+			// 混合：卡池 + 上游缓存，两者任意一个有货就能卖
+			switch {
+			case ss.SupplyCount == 0:
+				// 一条货源都没启用 → 实际等价于自有卡密
+				info.Available = pool
+				if pool == 0 {
+					info.Reason = "卡密池已空，且没有启用中的货源"
+					info.Hint = "混合模式要求「卡密池有货」或「有启用中的货源」至少满足一个：请导入卡密，或为该商品添加货源"
+				}
+			case ss.Stock < 0:
+				// 上游报「不限/未知」，加不出确切可售量
+				info.Available = -1
+			default:
+				info.Available = pool + ss.Stock
+				if info.Available == 0 {
+					info.Reason = "卡密池已空且上游缓存库存为 0"
+					info.Hint = "先点「同步库存」实时询价确认上游是否真的没货；确实没货就补卡密或换货源"
+				}
+			}
+
+		default:
+			// 上游代发：库存由上游决定，用缓存值给出参考
+			info.Available = ss.Stock
 			if info.SupplyCount == 0 {
 				info.Reason = "没有启用中的货源"
 				info.Hint = "该商品是「上游代发」模式，请到「商品与货源」为它添加货源（关联上游平台的商品）"
+			} else if info.Available == 0 {
+				info.Reason = "上游缓存库存为 0"
+				info.Hint = "缓存可能已过期：点「同步库存」实时询价确认；若确实没货请换货源或补库存"
 			}
 		}
 
@@ -523,11 +658,11 @@ func (s *ListingService) IncrSold(ctx context.Context, listingID uint, qty int) 
 		UpdateColumn("sold_count", gorm.Expr("sold_count + ?", qty)).Error
 }
 
-// LocalStockGoodsIDs 返回所有「自有卡密」模式的商品 ID，供后台筛选用。
+// LocalStockGoodsIDs 返回所有「会吃卡密池」的商品 ID（自有卡密 + 混合），供后台筛选用。
 func (s *ListingService) LocalStockGoodsIDs(ctx context.Context) ([]uint, error) {
 	var ids []uint
 	err := s.db.WithContext(ctx).Model(&models.Goods{}).
-		Where("stock_mode = ?", models.StockModeLocal).
+		Where("stock_mode IN ?", []int{models.StockModeLocal, models.StockModeHybrid}).
 		Pluck("id", &ids).Error
 	return ids, err
 }

@@ -124,14 +124,167 @@ func (s *OrderService) Create(ctx context.Context, in CreateOrderInput) (*models
 		return existing, nil
 	}
 
-	// ---- 构建候选货源 ----
-	// 自建商品（stock_mode=local）没有上游货源，走本地卡密池发货。
-	// 这条分支必须在 buildCandidates 之前分流：否则会直接报「没有可用的货源」，
-	// 而这类商品本来就不该有货源。
-	if goods.IsLocalStock() {
-		return s.createFromCardPool(ctx, &goods, in, quantity)
+	// ---- 按供货方式分流 ----
+	//
+	// 分流必须发生在 buildCandidates 之前：只吃卡密池的商品本来就没有 Supply，
+	// 按上游逻辑会直接报「没有可用的货源」，而这类商品压根不该有货源。
+	return s.dispatch(ctx, &goods, in, quantity)
+}
+
+// dispatch 按商品的供货方式把订单交给对应的发货通道。
+//
+// 三条通道：
+//
+//	local  —— 只吃卡密池
+//	hybrid —— 卡密池与上游都算货，按 LocalStockFirst 决定先后（见 createHybrid）
+//	其余   —— 走上游采购（默认，历史行为）
+func (s *OrderService) dispatch(
+	ctx context.Context,
+	goods *models.Goods,
+	in CreateOrderInput,
+	quantity int,
+) (*models.Order, error) {
+	switch {
+	case goods.IsLocalStock():
+		return s.createFromCardPool(ctx, goods, in, quantity)
+	case goods.IsHybridStock():
+		return s.createHybrid(ctx, goods, in, quantity)
+	default:
+		return s.createFromUpstream(ctx, goods, in, quantity)
+	}
+}
+
+// stockChannel 一笔订单从哪个通道取货。
+type stockChannel int
+
+const (
+	// channelPool 从自带卡密池取货
+	channelPool stockChannel = iota
+	// channelUpstream 向上游货源采购
+	channelUpstream
+)
+
+// String 便于日志与测试断言可读
+func (c stockChannel) String() string {
+	if c == channelPool {
+		return "pool"
+	}
+	return "upstream"
+}
+
+// hybridPlan 混合模式下一笔订单的取货计划。
+type hybridPlan struct {
+	// Primary 首选通道
+	Primary stockChannel
+	// FallbackToPool 首选上游失败后，是否允许退回卡密池兜底。
+	// 只有「上游优先且池子够」时才为 true —— 池子不够就没有兜底能力。
+	FallbackToPool bool
+}
+
+// planHybrid 根据「谁优先 + 池子够不够」算出取货计划。
+//
+// 抽成纯函数是为了让这条最容易搞错的判定能被穷举测试：
+// 它直接决定「退货卡密到底卖不卖得出去」，判反了不会报错，只会静默地少卖。
+//
+//	池子优先 + 池子够  → 池子
+//	池子优先 + 池子不够 → 上游（不拆单）
+//	上游优先 + 池子够   → 上游，失败退回池子
+//	上游优先 + 池子不够 → 上游（没有兜底）
+func planHybrid(localStockFirst, poolEnough bool) hybridPlan {
+	if localStockFirst {
+		if poolEnough {
+			return hybridPlan{Primary: channelPool}
+		}
+		return hybridPlan{Primary: channelUpstream}
+	}
+	return hybridPlan{Primary: channelUpstream, FallbackToPool: poolEnough}
+}
+
+// createHybrid 混合模式：卡密池与上游都是合法货源。
+//
+// 关键约束：**一笔订单只从一个通道取货，绝不拆单**。
+// 拆单（池子发 2 张 + 上游发 3 张）看起来能提高成单率，但上游那半一旦失败，
+// 退款金额、作废范围、卡密归属全部变得说不清 —— 收益远小于代价。
+//
+// 两种优先级的实际语义：
+//
+//	LocalStockFirst = true （默认）
+//	    池子够 → 整单吃池子（清退货库存，且这部分没有上游成本）
+//	    池子不够 → 整单走上游（池子里那几张这单不用，留给下一单）
+//
+//	LocalStockFirst = false
+//	    先走上游；上游全部失败 → 池子够就整单吃池子兜底
+//	    池子也不够 → 原样返回上游的失败原因
+func (s *OrderService) createHybrid(
+	ctx context.Context,
+	goods *models.Goods,
+	in CreateOrderInput,
+	quantity int,
+) (*models.Order, error) {
+	poolAvail, err := s.cards.CountAvailable(ctx, goods.ID)
+	if err != nil {
+		return nil, fmt.Errorf("查询卡密池库存失败: %w", err)
+	}
+	plan := planHybrid(goods.LocalStockFirst, poolAvail >= int64(quantity))
+
+	if plan.Primary == channelPool {
+		slog.Info("混合模式：卡密池优先，整单走卡密池",
+			"goods", goods.Code, "quantity", quantity, "pool_available", poolAvail)
+		return s.createFromCardPool(ctx, goods, in, quantity)
 	}
 
+	// 以下是「首选上游」的两条分支：池子优先但池子不够，或本来就上游优先。
+	if goods.LocalStockFirst {
+		// 池子不够就整单走上游：不拆单，也不因为池子里有几张就先发几张。
+		slog.Info("混合模式：卡密池不足，整单走上游",
+			"goods", goods.Code, "quantity", quantity, "pool_available", poolAvail)
+		return s.createFromUpstream(ctx, goods, in, quantity)
+	}
+
+	// 上游优先：先买上游，买不到再用池子兜底。
+	order, uerr := s.createFromUpstream(ctx, goods, in, quantity)
+	if uerr == nil && order != nil && order.Status == models.OrderStatusDelivered {
+		return order, nil
+	}
+	if !plan.FallbackToPool {
+		// 没有兜底能力，上游是什么结果就返回什么结果，
+		// 失败原因（含「全部货源超最高供应价」）必须原样带给调用方。
+		return order, uerr
+	}
+	if order == nil {
+		// 上游在「建订单之前」就失败了（例如一个货源都没配），
+		// 库里没有残留订单，可以直接新建一笔池子订单。
+		slog.Warn("混合模式：上游未下单即失败，改用卡密池兜底",
+			"goods", goods.Code, "pool_available", poolAvail, "error", errText(uerr))
+		return s.createFromCardPool(ctx, goods, in, quantity)
+	}
+
+	// 上游已经落了一笔失败订单（同一个 request_id）。这里必须复用它：
+	// 再建一笔同 request_id 的订单会撞唯一索引，反过来回放到那笔失败单。
+	slog.Warn("混合模式：上游采购失败，改用卡密池兜底",
+		"goods", goods.Code, "order_no", order.OrderNo,
+		"pool_available", poolAvail, "error", order.ErrorMsg)
+	return s.deliverFromPool(ctx, order, goods, in, quantity, true)
+}
+
+// errText 安全地把 error 转成日志文本（nil 转空串，避免打出 "<nil>"）。
+func errText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+// createFromUpstream 向上游货源采购并发货。
+//
+// 这是历史上唯一的发货通道，逻辑未做改动，只是从 Create 里抽出来，
+// 好让混合模式能在它失败时接管。
+func (s *OrderService) createFromUpstream(
+	ctx context.Context,
+	goods *models.Goods,
+	in CreateOrderInput,
+	quantity int,
+) (*models.Order, error) {
 	candidates, err := s.buildCandidates(ctx, goods.ID)
 	if err != nil {
 		return nil, err
@@ -303,7 +456,7 @@ func (s *OrderService) Create(ctx context.Context, in CreateOrderInput) (*models
 
 	// 生成附加内容与提货链接（仅在发货成功时）
 	if order.Status == models.OrderStatusDelivered {
-		order.ExtraText = s.renderExtra(ctx, &goods, order, purchased)
+		order.ExtraText = s.renderExtra(ctx, goods, order, purchased)
 	}
 
 	if err := s.db.WithContext(ctx).Create(order).Error; err != nil {
@@ -374,7 +527,6 @@ func (s *OrderService) createFromCardPool(
 	// 取卡密的过程是「取一张写一张」，中途没货就把前面已取的退回池子，
 	// 绝不出现「收了三张的钱只发两张」这种半成品订单。
 
-	now := time.Now()
 	order := &models.Order{
 		OrderNo:         generateOrderNo(),
 		RequestID:       in.RequestID,
@@ -398,6 +550,28 @@ func (s *OrderService) createFromCardPool(
 		}
 		return nil, fmt.Errorf("保存订单失败: %w", err)
 	}
+
+	return s.deliverFromPool(ctx, order, goods, in, quantity, false)
+}
+
+// deliverFromPool 把卡密池里的卡密发到一笔**已经存在**的订单上。
+//
+// 抽出来是为了混合模式：上游优先时，上游已经落了一笔失败订单，
+// 兜底不能再建一笔 —— 同一个 request_id 会撞唯一索引，反而回放成那笔失败单。
+// 只能把卡密发到原订单上，让它从 failed 变成 delivered。
+//
+// reused 表示「这笔订单是复用上游失败单」：
+// 复用时不覆盖 attempts，因为里面记着上游试过几次，
+// 那份记录恰恰是排查「为什么这单最后吃了池子」的关键线索。
+func (s *OrderService) deliverFromPool(
+	ctx context.Context,
+	order *models.Order,
+	goods *models.Goods,
+	in CreateOrderInput,
+	quantity int,
+	reused bool,
+) (*models.Order, error) {
+	now := time.Now()
 
 	// ---- 原子取卡密（按数量逐张取） ----
 	taken := make([]models.CardStock, 0, quantity)
@@ -425,6 +599,11 @@ func (s *OrderService) createFromCardPool(
 				if !errors.Is(err, ErrCardEmpty) {
 					msg = fmt.Sprintf("取卡密失败（已取到 %d 张，已全部退回）：%s", len(taken), err.Error())
 				}
+			}
+			// 复用上游失败单时，池子也没兜住 —— 两条失败原因都要留下，
+			// 否则运营只看到「卡密池无库存」，会以为这单根本没试过上游。
+			if reused && order.ErrorMsg != "" {
+				msg = fmt.Sprintf("上游采购失败（%s）；卡密池兜底也不足：%s", order.ErrorMsg, msg)
 			}
 			updates := map[string]any{
 				"status":     models.OrderStatusFailed,
@@ -466,7 +645,10 @@ func (s *OrderService) createFromCardPool(
 		"instruction":  goods.UsageInstruction,
 		"error_msg":    "",
 		"error_kind":   "",
-		"attempts":     1,
+	}
+	// 复用的订单已经记着上游试过几次，别用 1 把它盖掉。
+	if !reused {
+		updates["attempts"] = 1
 	}
 	if merr == nil {
 		updates["cards"] = datatypes.JSON(raw)
@@ -488,7 +670,11 @@ func (s *OrderService) createFromCardPool(
 	order.UnitPrice = unitPrice
 	order.TotalAmount = total
 	order.Instruction = goods.UsageInstruction
-	order.Attempts = 1
+	order.ErrorMsg = ""
+	order.ErrorKind = ""
+	if !reused {
+		order.Attempts = 1
+	}
 	if merr == nil {
 		order.Cards = datatypes.JSON(raw)
 	}
@@ -821,13 +1007,13 @@ func (s *OrderService) RetryQuery(ctx context.Context, orderID uint) (*models.Or
 	if err := s.db.WithContext(ctx).Preload("Goods").First(&order, orderID).Error; err != nil {
 		return nil, err
 	}
-	// 自有卡密商品没有上游单号，也就无所谓「重新查单」。
+	// 卡密池发货的订单没有上游单号，也就无所谓「重新查单」。
 	// 它的失败原因是池子空了，正确动作是补货后重新下单，而不是重查。
-	if order.Goods != nil && order.Goods.IsLocalStock() {
-		return &order, errors.New("该商品由自有卡密池发货，没有上游单号可查；补货后请重新下单")
-	}
+	//
+	// 注意这里判定的是「这笔订单实际从哪儿发的」，不是商品的供货方式：
+	// 混合模式可能这单吃了池子、下一单吃了上游，只有真正没有上游单号的才不能查。
 	if order.PlatformID == nil || order.PlatformTradeNo == "" {
-		return nil, errors.New("该订单没有上游单号，无法查单")
+		return &order, errors.New("该订单没有上游单号可查（由卡密池发货）；补货后请重新下单")
 	}
 	if order.Status == models.OrderStatusDelivered {
 		return &order, nil

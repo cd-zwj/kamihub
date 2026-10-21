@@ -34,6 +34,23 @@ const (
 	StockModeUpstream = 1
 	// StockModeLocal 用商品自带的卡密池本地发货（不依赖任何上游平台）
 	StockModeLocal = 2
+	// StockModeHybrid 卡密池 + 上游双通道。
+	//
+	// 为什么需要它：上游代发模式下，买家退款/撤单退回池子的卡密，
+	// 因为商品被钉死在「只走上游」而永远卖不出去，只能烂在池子里。
+	// 混合模式让同一笔订单既可能吃池子、也可能吃上游，
+	// 池子里的退货库存因此重新变成可售库存。
+	StockModeHybrid = 3
+)
+
+// 混合模式的取货顺序
+const (
+	// HybridPoolFirst 池子优先：池子够就整单吃池子，不够整单走上游。
+	// 目的是尽快清掉退货/自采库存（这部分没有上游成本，毛利更高）。
+	HybridPoolFirst = true
+	// HybridUpstreamFirst 上游优先：先向上游买，上游全挂了才用池子兜底。
+	// 目的是保住「上游有货就发上游」的既有习惯，池子只当保险。
+	HybridUpstreamFirst = false
 )
 
 // AllStrategies 供前端下拉使用
@@ -64,10 +81,27 @@ type Goods struct {
 	//
 	//	StockModeUpstream(1) —— 向上游平台的货源（Supply）采购，默认，历史行为
 	//	StockModeLocal(2)    —— 用商品自带的卡密池（card_stocks）本地发货
+	//	StockModeHybrid(3)   —— 卡密池与上游都算货，按 LocalStockFirst 决定先后
 	//
 	// 为什么需要它：有些商品运营自己手里就有卡密，不需要任何上游平台。
 	// 这类商品没有 Supply，按老逻辑永远「没有可用的货源」而下不了单。
 	StockMode int `gorm:"not null;default:1" json:"stock_mode"`
+
+	// LocalStockFirst 仅在 StockModeHybrid 下有意义：卡密池是否优先于上游。
+	//
+	//	true （应用默认）—— 池子够就整单吃池子，不够整单走上游
+	//	false            —— 先走上游，上游全失败才用池子兜底
+	//
+	// 默认 true 的理由：池子里的货是已经付过钱的沉没成本，
+	// 而且是退货/自采进来的，不清掉就一直占着资金。
+	//
+	// 注意 DDL 默认值是 false 而不是 true，这是刻意的：
+	// GORM 对「bool + default:true」字段，会把显式传入的 false 当成「没填」，
+	// 于是插入时用数据库默认值把它顶成 true —— 结果就是运营选了「上游优先」
+	// 却永远得到「卡密池优先」，而且不报错。把 DDL 默认值设成零值 false，
+	// 让「省略」和「false」落到同一个结果上，这条路才走得通。
+	// 应用层的默认 true 由 GoodsService.Create 显式赋值。
+	LocalStockFirst bool `gorm:"not null;default:false" json:"local_stock_first"`
 
 	// CostPrice 自建商品的单条成本价。仅用于算毛利与给定价做参考，
 	// 不参与下单判定（上游商品的成本红线是 MaxSupplyPrice）。
@@ -122,8 +156,24 @@ type Goods struct {
 
 func (Goods) TableName() string { return "goods" }
 
-// IsLocalStock 该商品是否走「自带卡密池」发货
+// IsLocalStock 该商品是否「只走自带卡密池」发货。
+//
+// 注意：混合模式也会吃卡密池，但它同时能走上游，
+// 所以判断「能不能用卡密池」要用 UsesCardPool，不能用这个。
 func (g *Goods) IsLocalStock() bool { return g.StockMode == StockModeLocal }
+
+// IsHybridStock 该商品是否是「卡密池 + 上游」混合模式
+func (g *Goods) IsHybridStock() bool { return g.StockMode == StockModeHybrid }
+
+// UsesCardPool 该商品的货是否可能来自自带卡密池（自有 / 混合都算）
+func (g *Goods) UsesCardPool() bool {
+	return g.StockMode == StockModeLocal || g.StockMode == StockModeHybrid
+}
+
+// UsesUpstream 该商品的货是否可能来自上游货源（上游 / 混合都算）
+func (g *Goods) UsesUpstream() bool {
+	return g.StockMode == StockModeUpstream || g.StockMode == StockModeHybrid
+}
 
 // Supply 一条货源：某个商品在某个平台上的对应商品。
 // 一个商品下可以有多条 Supply，路由引擎据此做选择与故障转移。

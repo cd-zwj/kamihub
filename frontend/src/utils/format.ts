@@ -37,6 +37,28 @@ export function untilText(v?: string | null): string {
   return `${Math.floor(diff / 24)} 天后过期`;
 }
 
+/**
+ * 距离现在过去了多久（用于展示「数据更新于 X 分钟前」）。
+ *
+ * 为什么要说人话而不是直接给时间戳：库存/价格是缓存值，
+ * 买家真正需要判断的是「这个数字有多新」，而不是「几点几分同步的」。
+ * 一分钟内不显示「0 分钟前」这种别扭文案，直接说「刚刚」。
+ */
+export function agoText(v?: string | null, fallback = '未知'): string {
+  if (!v) return fallback;
+  const d = dayjs(v);
+  if (!d.isValid()) return fallback;
+  const minutes = dayjs().diff(d, 'minute');
+  if (minutes < 0) return '刚刚';
+  if (minutes < 1) return '刚刚';
+  if (minutes < 60) return `${minutes} 分钟前`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} 小时前`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days} 天前`;
+  return d.format('YYYY-MM-DD');
+}
+
 /** 复制到剪贴板，带降级方案（HTTP 环境下 navigator.clipboard 不可用） */
 export async function copyText(text: string): Promise<boolean> {
   try {

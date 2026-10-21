@@ -115,8 +115,17 @@ export interface Goods {
   /** 最高供应价：单笔应付总额上限（含手续费）。0 = 不限制 */
   max_supply_price: string | number;
   extra_template: string;
-  /** 供货方式：1=向上游平台采购 2=用商品自带的卡密池本地发货 */
+  /** 供货方式：1=向上游平台采购 2=用商品自带的卡密池本地发货 3=卡密池+上游混合 */
   stock_mode: number;
+  /**
+   * 混合模式下卡密池是否优先。
+   *
+   * true （默认）—— 池子够就整单吃池子，不够整单走上游
+   * false        —— 先走上游，上游全失败才用池子兜底
+   *
+   * 只在 stock_mode=3 时有意义。
+   */
+  local_stock_first: boolean;
   /** 自建商品的单条成本价（仅用于算毛利，不会展示给买家） */
   cost_price: string | number;
   /** 自建商品的通用使用说明（买家在提货页看到的「使用方式」） */
@@ -381,11 +390,12 @@ export const DELIVERY_MODE_TEXT: Record<number, string> = {
 
 /**
  * 供货方式的中文名。
- * 1 = 原来那套「向上游平台采购」，2 = 新增的「自有卡密池」。
+ * 1 = 向上游平台采购，2 = 自有卡密池，3 = 卡密池 + 上游混合。
  */
 export const STOCK_MODE_TEXT: Record<number, string> = {
   1: '上游采购',
   2: '自有卡密',
+  3: '卡密池+上游',
 };
 
 /**
