@@ -422,3 +422,98 @@ export const CONTACT_TYPES = [
   { value: 'phone', label: '联系电话' },
   { value: 'other', label: '其他' },
 ];
+
+// ---------------------------------------------------------------- 迭代 1：运维地基
+
+/** 一次定时任务的执行记录 */
+export interface WorkerTaskRun {
+  id: number;
+  task: string;
+  started_at: string;
+  finished_at?: string | null;
+  ok: boolean;
+  affected: number;
+  error_msg?: string;
+  detail?: string;
+  duration_ms: number;
+}
+
+/** 定时任务静态信息 + 最近一次执行 */
+export interface WorkerTask {
+  name: string;
+  last_run?: WorkerTaskRun | null;
+}
+
+/** 对账差异 */
+export interface ReconcileDiff {
+  id: number;
+  biz_date: string;
+  kind: string;
+  order_no?: string;
+  platform_id?: number | null;
+  trade_no?: string;
+  local_status?: string;
+  remote_status?: string;
+  amount: string;
+  detail?: Record<string, unknown> | null;
+  resolved: boolean;
+  resolved_by?: number | null;
+  resolved_at?: string | null;
+  remark?: string;
+  created_at: string;
+}
+
+/** 运维告警 / 站内信 */
+export interface Notification {
+  id: number;
+  buyer_id?: number | null;
+  level: 'info' | 'warn' | 'error' | string;
+  event: string;
+  title: string;
+  content?: string;
+  link?: string;
+  read: boolean;
+  read_at?: string | null;
+  channels?: Record<string, string> | null;
+  created_at: string;
+}
+
+/** 通知渠道状态 */
+export interface NotifyStatus {
+  enabled: boolean;
+  channels: string[];
+  quiet: { start: number; end: number };
+  aggregate_window_sec: number;
+}
+
+/** 任务名 → 中文 */
+export const TASK_TEXT: Record<string, string> = {
+  stock_sync: '库存同步',
+  balance_sync: '余额同步',
+  expire_payment: '超时支付单关闭',
+  stale_order: '卡单补偿',
+  reconcile: '对账检测',
+};
+
+export function taskText(name: string): string {
+  return TASK_TEXT[name] || name;
+}
+
+/** 对账差异类型 → 中文 */
+export const RECONCILE_KIND_TEXT: Record<string, string> = {
+  order_missing_local: '上游有单本地无',
+  order_status_mismatch: '状态不一致',
+  wallet_frozen_stale: '冻结超时未决',
+  payment_not_settled: '支付未入账',
+};
+
+export function reconcileKindText(kind: string): string {
+  return RECONCILE_KIND_TEXT[kind] || kind;
+}
+
+/** 告警级别 → 颜色 */
+export const LEVEL_COLOR: Record<string, string> = {
+  info: 'blue',
+  warn: 'orange',
+  error: 'red',
+};

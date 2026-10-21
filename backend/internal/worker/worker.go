@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/errgroup"
 	"gorm.io/gorm"
 
 	"kamihub/internal/notify"
@@ -92,21 +93,25 @@ func (r *Runner) Start(ctx context.Context) error {
 			"timeout", t.Timeout.String())
 	}
 
-	var wg sync.WaitGroup
+	// 用 errgroup 统一管理各任务 goroutine：
+	// 任一任务返回错误不会取消其他任务（任务级错误已经在 execute 里
+	// recover 并落库，这里返回错误只表示「调度器本身出了问题」）。
+	g, gctx := errgroup.WithContext(ctx)
 	for i := range r.tasks {
 		t := r.tasks[i]
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			r.loop(ctx, t)
-		}()
+		g.Go(func() error {
+			r.loop(gctx, t)
+			return nil
+		})
 	}
 
+	// 等外部 ctx 取消，然后等所有任务优雅退出
 	<-ctx.Done()
 	slog.Info("worker 收到退出信号，等待任务结束")
-	wg.Wait()
+
+	err := g.Wait()
 	slog.Info("worker 已退出")
-	return nil
+	return err
 }
 
 // loop 单任务的主循环。

@@ -2,7 +2,8 @@ import axios, { AxiosError } from 'axios';
 import { message } from 'antd';
 import type {
   AdapterMeta, AllSettings, AuditLog, CallLog, CardListResult, CardStats, DashboardStats, Delivery,
-  DeliveryView, Envelope, Goods, Order, OrderAttempt, PageResult, Platform, StrategyMeta, Supply, User,
+  DeliveryView, Envelope, Goods, Notification, NotifyStatus, Order, OrderAttempt, PageResult,
+  Platform, ReconcileDiff, StrategyMeta, Supply, User, WorkerTask, WorkerTaskRun,
 } from './types';
 
 const TOKEN_KEY = 'kamihub_token';
@@ -234,6 +235,37 @@ export const api = {
   deleteUser: (id: number) => unwrap<{ message: string }>(http.delete(`/users/${id}`)),
   resetPassword: (id: number, new_password: string) =>
     unwrap<{ message: string }>(http.post(`/users/${id}/reset-password`, { new_password })),
+
+  // ---------- 运维（迭代 1）----------
+  // 定时任务：列表 + 执行记录 + 手动触发（排障用）
+  workerTasks: () =>
+    unwrap<{ list: WorkerTask[]; worker_active: boolean }>(http.get('/workers/tasks')),
+  workerRuns: (q: ListQuery = {}) =>
+    unwrap<PageResult<WorkerTaskRun>>(http.get('/workers/runs', { params: q })),
+  runWorkerTask: (task: string) =>
+    unwrap<{ task: string; affected: number; detail: string }>(http.post(`/workers/${task}/run`)),
+
+  // 对账差异：列表（带未处理汇总）+ 标记已处理 + 手动对账
+  reconcileDiffs: (q: ListQuery = {}) =>
+    unwrap<PageResult<ReconcileDiff> & { unresolved: { count: number; amount: string } }>(
+      http.get('/reconcile/diffs', { params: q }),
+    ),
+  resolveReconcileDiff: (id: number, remark: string) =>
+    unwrap<{ id: number }>(http.post(`/reconcile/diffs/${id}/resolve`, { remark })),
+  runReconcile: () =>
+    unwrap<{ biz_date: string; total: number; by_kind: Record<string, number>; duration_ms: number }>(
+      http.post('/reconcile/run'),
+    ),
+
+  // 运维告警 / 站内信
+  notifications: (q: ListQuery = {}) =>
+    unwrap<PageResult<Notification> & { unread: number }>(http.get('/notifications', { params: q })),
+  readNotification: (id: number) => unwrap<{ id: number }>(http.post(`/notifications/${id}/read`)),
+  readAllNotifications: () => unwrap<{ done: boolean }>(http.post('/notifications/read-all')),
+
+  // 通知渠道
+  notifyStatus: () => unwrap<NotifyStatus>(http.get('/notify/status')),
+  testNotify: () => unwrap<{ sent: boolean; channels: string[] }>(http.post('/notify/test')),
 };
 
 export default http;

@@ -136,10 +136,10 @@ func (h *Handlers) listReconcileDiffs(c *gin.Context) {
 	unresolvedCount, unresolvedAmount, _ := h.reconcile.SumUnresolved(c.Request.Context())
 
 	OK(c, gin.H{
-		"list":  rows,
-		"total": total,
-		"page":  page,
-		"size":  size,
+		"list":      rows,
+		"total":     total,
+		"page":      page,
+		"page_size": size,
 		"unresolved": gin.H{
 			"count":  unresolvedCount,
 			"amount": unresolvedAmount.StringFixed(2),
@@ -227,7 +227,7 @@ func (h *Handlers) listNotifications(c *gin.Context) {
 	_ = h.db.WithContext(c.Request.Context()).Model(&models.Notification{}).
 		Where("buyer_id IS NULL AND read = ?", false).Count(&unread).Error
 
-	OK(c, gin.H{"list": rows, "total": total, "page": page, "size": size, "unread": unread})
+	OK(c, gin.H{"list": rows, "total": total, "page": page, "page_size": size, "unread": unread})
 }
 
 // readNotification 标记单条已读。
