@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Button, Card, Form, Input, Modal, Popconfirm, Select, Space, Table, Tag, message } from 'antd';
+import { Button, Card, Form, Input, Modal, Popconfirm, Select, Space, Table, message } from 'antd';
 import { DeleteOutlined, EditOutlined, KeyOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons';
 import { api, toastError } from '@/api/client';
 import type { User } from '@/api/types';
 import { fmtTime } from '@/utils/format';
 import { useAuth } from '@/auth/AuthContext';
+import { PageHeader, StatusTag } from '@/admin/ui';
 
 export default function Users() {
   const { user: me } = useAuth();
@@ -107,17 +108,15 @@ export default function Users() {
 
   return (
     <>
-      <div className="page-head">
-        <div>
-          <h2 className="page-title">用户</h2>
-          <p className="page-desc">
-            单租户多操作员：所有用户共享同一套平台与商品数据。管理员可管理配置，操作员只能查看订单与发货。
-          </p>
-        </div>
-        <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
-          新增用户
-        </Button>
-      </div>
+      <PageHeader
+        title="用户"
+        desc="单租户多操作员：共享同一套平台与商品数据，管理员管配置，操作员只能查看订单与发货"
+        extra={
+          <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
+            新增用户
+          </Button>
+        }
+      />
 
       <Card size="small">
         <div className="table-toolbar">
@@ -146,33 +145,40 @@ export default function Users() {
               title: '用户名',
               dataIndex: 'username',
               render: (v, r) => (
-                <Space size={6}>
-                  <span style={{ fontWeight: 600 }}>{v}</span>
-                  {r.id === me?.id && <Tag color="blue">当前登录</Tag>}
-                </Space>
+                <div className="a-cell-main">
+                  <span style={{ fontWeight: 600, color: 'var(--a-ink)' }}>{v}</span>
+                  {r.id === me?.id && <StatusTag tone="info">当前登录</StatusTag>}
+                </div>
               ),
             },
             { title: '姓名', dataIndex: 'display_name', render: (v) => v || '-' },
             {
               title: '角色',
               dataIndex: 'role',
-              width: 110,
-              render: (v) => (v === 'admin' ? <Tag color="blue">管理员</Tag> : <Tag>操作员</Tag>),
+              width: 100,
+              render: (v) => (
+                <StatusTag tone={v === 'admin' ? 'info' : 'neutral'}>{v === 'admin' ? '管理员' : '操作员'}</StatusTag>
+              ),
             },
             {
               title: '状态',
               dataIndex: 'status',
-              width: 90,
-              render: (v) => (v === 1 ? <Tag color="success">启用</Tag> : <Tag color="error">禁用</Tag>),
+              width: 80,
+              render: (v) => (
+                <StatusTag tone={v === 1 ? 'success' : 'danger'} dot>
+                  {v === 1 ? '启用' : '禁用'}
+                </StatusTag>
+              ),
             },
             {
               title: '最近登录',
-              width: 200,
+              width: 240,
+              // 时间 + IP 放同一行：竖排会把行高撑到 65px 且右侧留一大块空白
               render: (_, r) => (
-                <Space direction="vertical" size={0}>
-                  <span style={{ fontSize: 13 }}>{fmtTime(r.last_login_at)}</span>
-                  <span style={{ fontSize: 12, color: '#98a0b0' }}>{r.last_login_ip || '-'}</span>
-                </Space>
+                <div className="a-cell-main">
+                  <span className="a-nowrap">{fmtTime(r.last_login_at)}</span>
+                  <span className="a-cell-sub">{r.last_login_ip || '-'}</span>
+                </div>
               ),
             },
             {

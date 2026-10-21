@@ -132,7 +132,23 @@ func run() error {
 	shopOrders := service.NewShopOrderService(db, listings, wallet, orders)
 	// 在线支付（易支付）：默认关闭，需管理员在后台「系统设置 → 在线支付」里
 	// 填好商户参数并打开开关后才会对买家可见。
-	payment := service.NewPaymentService(db, cfg, settings, wallet)
+	//
+	// 传入 shopOrders 是为了支持「直付购卡」：买家不必先充值，
+	// 直接支付宝付款，到账后自动扣余额下单发货（失败则钱留在余额）。
+	// 依赖方向 shopOrders → wallet/orders，payment → shopOrders，不成环。
+	payment := service.NewPaymentService(db, cfg, settings, wallet, shopOrders)
+
+	// 开放接口凭证：买家在用户页面自助签发 app_id + secret，
+	// 用 HMAC-SHA256 签名调用 /api/open/*（下游 / 代理模式）。
+	apiKeys := service.NewBuyerApiKeyService(db, cfg)
+
+	// 买家工单（售后咨询）：提单时自动带入订单上下文，运营打开就能判断问题
+	tickets := service.NewTicketService(db)
+
+	// 匿名购买：不注册账号也能买，用「邮箱 + 6 位安全密码」下单与查单。
+	// 匿名买家仍然落在 buyers 表（is_guest=true），因此完全复用
+	// 现有支付与自动发货链路，支付核心零改动。
+	guests := service.NewGuestService(db)
 
 	renderer, err := render.New()
 	if err != nil {
@@ -159,6 +175,9 @@ func run() error {
 		Wallet:     wallet,
 		ShopOrders: shopOrders,
 		Payment:    payment,
+		ApiKeys:    apiKeys,
+		Tickets:    tickets,
+		Guests:     guests,
 	})
 
 	// ---------- HTTP ----------
@@ -202,9 +221,29 @@ func run() error {
 	// ---------- 优雅退出 ----------
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+
+	// ---------- 支付单超时巡检 ----------
+	//
+	// 过期未支付的单子必须被标记掉，否则会永久占用
+	// max_pending_orders 的额度，买家撞上限后再也发不起新支付。
+	//
+	// 注意：janitor 用独立的 stop channel，不复用 quit。
+	// 若共用 quit，两个 goroutine 抢读同一个 channel，
+	// 信号只会被其中一个收到（Go 的 channel 是单播），
+	// 另一个就永远等不到退出。这里显式 fan-out。
+	janitorStop := make(chan struct{})
+	janitorDone := make(chan struct{})
+	go func() {
+		defer close(janitorDone)
+		startPaymentExpiryJanitor(payment, janitorStop)
+	}()
+
 	<-quit
 
 	slog.Info("收到退出信号，正在优雅关闭")
+	close(janitorStop) // 通知巡检停止
+	<-janitorDone      // 等它真的退出，避免日志写到一半
+
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
@@ -259,4 +298,58 @@ func itoa(v int) string {
 		v /= 10
 	}
 	return string(digits)
+}
+
+// ---------------------------------------------------------------- 支付单超时巡检
+
+// paymentExpiryInterval 巡检间隔。
+//
+// 5 分钟足够：支付单有效期是 30 分钟，即使晚关几轮，
+// 也不会让买家的额度长期被占。间隔太短纯属空跑。
+const paymentExpiryInterval = 5 * time.Minute
+
+// startPaymentExpiryJanitor 周期性把超时未支付的支付单标记为 expired。
+//
+// 为什么需要它：Create() 用「进行中支付单数量」做防刷上限，
+// 而计数只看 status=pending。没有巡检的话，买家点了几次支付却没付，
+// 这些单会永远停在 pending，把额度占满后买家再也发不起新支付。
+//
+// 并发安全：ExpireStale 是一条带条件的 UPDATE，天然幂等，
+// 多实例或多轮重入都不会重复处理。
+//
+// 退出：监听 stop，收到后立即返回。
+func startPaymentExpiryJanitor(
+	payment *service.PaymentService,
+	stop <-chan struct{},
+) {
+	ticker := time.NewTicker(paymentExpiryInterval)
+	defer ticker.Stop()
+
+	// 启动先立刻跑一次：进程重启前可能已经积压了一批死单
+	sweep := func() {
+		// 单次巡检给 30 秒，数据库卡住时不要拖住下一个周期
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		n, err := payment.ExpireStale(ctx)
+		if err != nil {
+			// 失败只记日志：下一轮会重试，绝不能因为一次失败就退出
+			slog.Warn("支付单超时巡检失败", "error", err.Error())
+			return
+		}
+		if n > 0 {
+			slog.Info("已关闭超时未支付的支付单", "count", n)
+		}
+	}
+
+	sweep()
+	for {
+		select {
+		case <-stop:
+			slog.Info("支付单巡检已停止")
+			return
+		case <-ticker.C:
+			sweep()
+		}
+	}
 }

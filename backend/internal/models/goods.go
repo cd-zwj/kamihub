@@ -57,8 +57,13 @@ type Goods struct {
 	FailoverEnabled bool   `gorm:"not null;default:true" json:"failover_enabled"`
 	MaxAttempts     int    `gorm:"not null;default:3" json:"max_attempts"`
 
-	// 单次采购数量上限
-	MaxQuantity int `gorm:"not null;default:1" json:"max_quantity"`
+	// 单次采购数量上限。0 表示不限购。
+	//
+	// 默认值必须是 0：以前默认 1，新建商品时若没注意这个字段，
+	// 商品就会静默变成「限购 1 件」——买家买 2 件会被本地校验拦下，
+	// 而商城前端当时只按 listing.max_qty 展示，看不出任何限制，
+	// 结果是买家看到「发货失败、钱退回余额」，运营查上游却明明有货。
+	MaxQuantity int `gorm:"not null;default:0" json:"max_quantity"`
 
 	// StockMode 供货方式，决定下单时去哪儿找货：
 	//

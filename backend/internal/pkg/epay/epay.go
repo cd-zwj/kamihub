@@ -60,6 +60,10 @@ type Config struct {
 	MapIPath   string
 	QueryPath  string
 	Timeout    time.Duration
+
+	// Gateway 接入方式，取值见 gateway.go 的 GatewayStandard / GatewayRedirect。
+	// 留空按标准方式处理 —— 因此老配置升级后行为完全不变。
+	Gateway string
 }
 
 // Normalize 补齐默认路径与超时。
@@ -346,13 +350,28 @@ var httpClient = &http.Client{
 	},
 }
 
-func httpPostForm(ctx context.Context, endpoint string, form url.Values, timeout time.Duration) (string, error) {
+// httpResponse 一次 HTTP 调用的原始结果。
+//
+// 单独把状态码与 Location 暴露出来，是因为「302 跳转式」网关（见 gateway.go）
+// 用 3xx 的 Location 表达收银台地址 —— 那是正常响应，不是错误。
+// 标准接入方式仍然只看 Body，由下面的 httpPostForm 包装。
+type httpResponse struct {
+	Status   int
+	Body     string
+	Location string
+}
+
+// httpPostFormRaw 发一次表单 POST，把状态码 / 响应体 / Location 原样返回。
+//
+// 只有传输层失败（连不上、读不出）才返回 error；HTTP 状态码一律交给调用方判断，
+// 因为「非 200 即失败」只对标准接入方式成立。
+func httpPostFormRaw(ctx context.Context, endpoint string, form url.Values, timeout time.Duration) (*httpResponse, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	// 部分易支付站点会做 UA 过滤，带上一个正常的标识
@@ -360,20 +379,36 @@ func httpPostForm(ctx context.Context, endpoint string, form url.Values, timeout
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("请求易支付失败：%w", err)
+		return nil, fmt.Errorf("请求易支付失败：%w", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
 	if err != nil {
-		return "", fmt.Errorf("读取易支付响应失败：%w", err)
+		return nil, fmt.Errorf("读取易支付响应失败：%w", err)
 	}
-	slog.Debug("易支付响应", "endpoint", endpoint, "status", resp.StatusCode, "len", len(body))
 
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("易支付返回 HTTP %d：%s", resp.StatusCode, truncate(string(body), 200))
+	out := &httpResponse{
+		Status:   resp.StatusCode,
+		Body:     string(body),
+		Location: resp.Header.Get("Location"),
 	}
-	return string(body), nil
+	slog.Debug("易支付响应", "endpoint", endpoint, "status", out.Status, "len", len(out.Body), "location", out.Location)
+	return out, nil
+}
+
+// httpPostForm 标准接入方式用的薄包装：只接受 200，其余按失败处理。
+//
+// 行为与拆分前逐字一致（包括错误文案），拆分只是为了给 302 跳转式复用传输层。
+func httpPostForm(ctx context.Context, endpoint string, form url.Values, timeout time.Duration) (string, error) {
+	res, err := httpPostFormRaw(ctx, endpoint, form, timeout)
+	if err != nil {
+		return "", err
+	}
+	if res.Status != http.StatusOK {
+		return "", fmt.Errorf("易支付返回 HTTP %d：%s", res.Status, truncate(res.Body, 200))
+	}
+	return res.Body, nil
 }
 
 func httpGet(ctx context.Context, endpoint string, timeout time.Duration) (string, error) {

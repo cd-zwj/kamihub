@@ -5,6 +5,7 @@ import {
 import { DeleteOutlined, PlusOutlined, SaveOutlined } from '@ant-design/icons';
 import { api, toastError } from '@/api/client';
 import { CONTACT_TYPES, type AllSettings, type ContactItem, type InstructionRule } from '@/api/types';
+import { PageHeader } from '@/admin/ui';
 
 /**
  * 使用说明净化规则编辑器。
@@ -227,12 +228,7 @@ export default function Settings() {
 
   return (
     <>
-      <div className="page-head">
-        <div>
-          <h2 className="page-title">系统设置</h2>
-          <p className="page-desc">这些配置会直接影响买家看到的提货页内容。</p>
-        </div>
-      </div>
+      <PageHeader title="系统设置" desc="这些配置会直接影响买家看到的提货页内容" />
 
       <Card size="small" loading={loading}>
         <Tabs

@@ -53,6 +53,47 @@ type ShopPurchaseInput struct {
 	ClientIP string
 }
 
+// ShopQuote 一次下单的服务端权威报价。
+//
+// 「权威」是重点：金额一律由服务端按 listing 的当前售价算出来，
+// 任何来自前端的金额都只作为交叉校验，不参与计算。
+// 这样「先充值再自动下单」的流程里，支付金额和下单金额
+// 必然来自同一个来源，不存在两边价格对不上的可能。
+type ShopQuote struct {
+	ListingID uint            `json:"listing_id"`
+	Title     string          `json:"title"`
+	GoodsCode string          `json:"goods_code"`
+	Quantity  int             `json:"quantity"`
+	UnitPrice decimal.Decimal `json:"unit_price"`
+	Total     decimal.Decimal `json:"total"`
+}
+
+// Quote 按 C 端售价算一单要多少钱。
+//
+// 供支付服务在「直付购卡」时取权威金额使用：
+// 前端传的 amount 会被这里算出来的值覆盖，防止有人改前端把 7.5 元
+// 的商品用 0.01 元买走。
+func (s *ShopOrderService) Quote(ctx context.Context, listingID uint, quantity int) (*ShopQuote, error) {
+	if quantity <= 0 {
+		quantity = 1
+	}
+	listing, total, err := s.listings.BuyerQuote(ctx, listingID, quantity)
+	if err != nil {
+		return nil, err
+	}
+	if listing.Goods == nil {
+		return nil, ErrListingNotFound
+	}
+	return &ShopQuote{
+		ListingID: listing.ID,
+		Title:     listing.Title,
+		GoodsCode: listing.Goods.Code,
+		Quantity:  quantity,
+		UnitPrice: listing.SalePrice,
+		Total:     total,
+	}, nil
+}
+
 // ShopPurchaseResult 下单结果
 type ShopPurchaseResult struct {
 	OrderNo      string          `json:"order_no"`
@@ -310,6 +351,29 @@ func (s *ShopOrderService) GetBuyerOrder(ctx context.Context, buyerID, orderID u
 	var order models.Order
 	if err := s.db.WithContext(ctx).Preload("Goods").Preload("Delivery").
 		Where("id = ? AND buyer_id = ?", orderID, buyerID).
+		First(&order).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errors.New("订单不存在")
+		}
+		return nil, err
+	}
+	v := toShopOrderView(&order)
+	return &v, nil
+}
+
+// GetBuyerOrderByNo 按订单号取买家自己的订单。
+//
+// 给下游对接用：发卡系统通常只存「我们返回给它的订单号」，
+// 拿订单号来查比记住自增 id 更自然，也更不容易串号。
+// 同样强制带 buyer_id，不能靠猜订单号看别人的单。
+func (s *ShopOrderService) GetBuyerOrderByNo(ctx context.Context, buyerID uint, orderNo string) (*ShopOrderView, error) {
+	orderNo = strings.TrimSpace(orderNo)
+	if orderNo == "" {
+		return nil, errors.New("订单不存在")
+	}
+	var order models.Order
+	if err := s.db.WithContext(ctx).Preload("Goods").Preload("Delivery").
+		Where("order_no = ? AND buyer_id = ?", orderNo, buyerID).
 		First(&order).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, errors.New("订单不存在")

@@ -87,6 +87,13 @@ func Migrate(db *gorm.DB) error {
 		&models.RechargeCode{},
 		// 第三方支付（易支付）订单，同样是纯新增表
 		&models.PaymentOrder{},
+		// 买家自助签发的开放接口凭证（下游 / 代理签名调用），纯新增表
+		&models.BuyerApiKey{},
+		// 买家工单（售后咨询），纯新增表，不影响任何既有数据
+		&models.Ticket{},
+		&models.TicketMessage{},
+		// 商品阶梯折扣（买满 N 件打 M 折），纯新增表
+		&models.ListingTier{},
 	)
 }
 

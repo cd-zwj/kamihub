@@ -1,7 +1,7 @@
 import { Navigate, Route, Routes } from 'react-router-dom';
 import { Spin } from 'antd';
 import { useAuth } from '@/auth/AuthContext';
-import AppLayout from '@/layout/AppLayout';
+import AppLayout from './AdminLayout';
 import Login from '@/pages/Login';
 import Dashboard from '@/pages/Dashboard';
 import Platforms from '@/pages/Platforms';
@@ -13,6 +13,7 @@ import Users from '@/pages/Users';
 import Settings from '@/pages/Settings';
 import Tokens from '@/pages/Tokens';
 import Logs from '@/pages/Logs';
+import Tickets from '@/pages/Tickets';
 import ShopAdmin from '@/pages/ShopAdmin';
 import PaymentAdmin from '@/pages/PaymentAdmin';
 import AdminGuide from '@/docs/AdminGuide';
@@ -60,6 +61,8 @@ export default function AdminApp() {
         <Route path="/admin/goods" element={<Goods />} />
         <Route path="/admin/platforms" element={<Platforms />} />
         <Route path="/admin/logs" element={<Logs />} />
+        {/* 工单：所有登录的用户都能处理售后，不额外限制管理员 */}
+        <Route path="/admin/tickets" element={<Tickets />} />
         {/* 以下仅管理员可见，非管理员访问会被兜底路由弹回概览 */}
         {isAdmin && <Route path="/admin/shop-admin" element={<ShopAdmin />} />}
         {isAdmin && <Route path="/admin/payment-admin" element={<PaymentAdmin />} />}

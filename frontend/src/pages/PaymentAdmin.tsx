@@ -10,11 +10,11 @@ import {
   InputNumber,
   Modal,
   Row,
+  Segmented,
   Select,
   Space,
   Switch,
   Table,
-  Tag,
   Typography,
   message,
 } from 'antd';
@@ -24,14 +24,14 @@ import {
   ExclamationCircleOutlined,
   ReloadOutlined,
   SaveOutlined,
-  ThunderboltOutlined,
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import adminShopApi from '@/api/adminShop';
 import type { AdminPaymentOrder, PaymentSettings } from '@/api/adminShop';
 import { api, toastError } from '@/api/client';
+import { PageHeader, Section, StatusTag, toneOf } from '@/admin/ui';
 
-const { Title, Text, Paragraph } = Typography;
+const { Text } = Typography;
 
 function money(v: string | number | undefined | null): string {
   const n = Number(v ?? 0);
@@ -60,6 +60,7 @@ const DEFAULT_PAYMENT: PaymentSettings = {
   submit_path: '/submit.php',
   mapi_path: '/mapi.php',
   query_path: '/api.php',
+  gateway: 'epay',
   site_name: '卡密商城',
   pay_types: ['alipay', 'wxpay'],
   min_amount: 1,
@@ -170,8 +171,8 @@ function PaymentConfigPanel() {
         />
       )}
 
-      <Title level={5}>商户参数</Title>
-      <Row gutter={16}>
+      <Section title="商户参数" desc="由支付服务商提供，填写错误会导致支付失败">
+      <Row gutter={[20, 16]}>
         <Col xs={24} lg={12}>
           <Form.Item
             name="api_url"
@@ -202,8 +203,35 @@ function PaymentConfigPanel() {
           </Form.Item>
         </Col>
       </Row>
+      </Section>
 
-      <Row gutter={16}>
+      <Section title="接入方式" desc="不确定就保持「标准易支付」，报错时再换">
+      <Row gutter={[20, 16]}>
+        <Col xs={24}>
+          <Form.Item
+            name="gateway"
+            label="上游协议类型"
+            extra="不确定就保持「标准易支付」。若下单时报「易支付返回 HTTP 302」，说明你的网关是跳转式，改选第二项。"
+          >
+            <Select
+              options={[
+                {
+                  value: 'epay',
+                  label: '标准易支付（submit.php 返回自动提交的表单）',
+                },
+                {
+                  value: 'epay_redirect',
+                  label: '302 跳转式（submit.php 302 跳转到收银台，如彩豆 521cd）',
+                },
+              ]}
+            />
+          </Form.Item>
+        </Col>
+      </Row>
+      </Section>
+
+      <Section title="业务参数">
+      <Row gutter={[20, 16]}>
         <Col xs={24} lg={8}>
           <Form.Item name="site_name" label="站点名称" extra="显示在支付页上">
             <Input placeholder="卡密商城" />
@@ -227,11 +255,10 @@ function PaymentConfigPanel() {
           </Form.Item>
         </Col>
       </Row>
+      </Section>
 
-      <Title level={5} style={{ marginTop: 8 }}>
-        限额与风控
-      </Title>
-      <Row gutter={16}>
+      <Section title="限额与风控" desc="防止刷单与资金风险，0 表示不限">
+      <Row gutter={[20, 16]}>
         <Col xs={12} lg={6}>
           <Form.Item name="min_amount" label="单笔最低（元）">
             <InputNumber style={{ width: '100%' }} min={0.01} precision={2} />
@@ -261,11 +288,10 @@ function PaymentConfigPanel() {
           </Form.Item>
         </Col>
       </Row>
+      </Section>
 
-      <Title level={5} style={{ marginTop: 8 }}>
-        高级（一般不用改）
-      </Title>
-      <Row gutter={16}>
+      <Section title="高级" desc="一般不用改，仅对接非标准网关时才需要调整">
+      <Row gutter={[20, 16]}>
         <Col xs={24} lg={8}>
           <Form.Item name="submit_path" label="页面跳转支付路径" extra="默认 /submit.php">
             <Input placeholder="/submit.php" />
@@ -282,6 +308,7 @@ function PaymentConfigPanel() {
           </Form.Item>
         </Col>
       </Row>
+      </Section>
 
       <Row gutter={16}>
         <Col xs={24} lg={12}>
@@ -403,10 +430,11 @@ function PaymentOrdersPanel() {
       title: '状态',
       dataIndex: 'status',
       width: 100,
-      render: (v: string) => {
-        const s = PAY_STATUS[v] ?? { text: v, color: 'default' };
-        return <Tag color={s.color}>{s.text}</Tag>;
-      },
+      render: (v: string) => (
+        <StatusTag tone={toneOf(v)} dot>
+          {PAY_STATUS[v]?.text ?? v}
+        </StatusTag>
+      ),
     },
     {
       title: '上游单号',
@@ -519,9 +547,9 @@ function PaymentOrdersPanel() {
               {PAY_TYPE_LABEL[detail.pay_type] ?? detail.pay_type}
             </Descriptions.Item>
             <Descriptions.Item label="状态">
-              <Tag color={PAY_STATUS[detail.status]?.color ?? 'default'}>
+              <StatusTag tone={toneOf(detail.status)} dot>
                 {PAY_STATUS[detail.status]?.text ?? detail.status}
-              </Tag>
+              </StatusTag>
             </Descriptions.Item>
             <Descriptions.Item label="收到回调">{detail.notify_count} 次</Descriptions.Item>
             <Descriptions.Item label="最近回调">
@@ -555,25 +583,20 @@ export default function PaymentAdmin() {
 
   return (
     <div>
-      <div style={{ marginBottom: 16 }}>
-        <Title level={4} style={{ marginBottom: 4 }}>
-          <ThunderboltOutlined /> 在线支付
-        </Title>
-        <Paragraph type="secondary" style={{ marginBottom: 0 }}>
-          对接易支付，让买家可以扫码充值到余额。支持随时开关。
-        </Paragraph>
-      </div>
+      <PageHeader title="在线支付" desc="对接易支付，让买家可以扫码充值到余额，支持随时开关" />
 
-      <Space style={{ marginBottom: 16 }}>
-        <Button type={tab === 'config' ? 'primary' : 'default'} onClick={() => setTab('config')}>
-          支付配置
-        </Button>
-        <Button type={tab === 'orders' ? 'primary' : 'default'} onClick={() => setTab('orders')}>
-          支付订单
-        </Button>
-      </Space>
+      {/* 两个 Tab 改成分段控件：并排两个普通按钮无法表达「当前在哪个视图」 */}
+      <Segmented
+        style={{ marginBottom: 16 }}
+        value={tab}
+        onChange={(v) => setTab(v as 'config' | 'orders')}
+        options={[
+          { value: 'config', label: '支付配置' },
+          { value: 'orders', label: '支付订单' },
+        ]}
+      />
 
-      <Card>{tab === 'config' ? <PaymentConfigPanel /> : <PaymentOrdersPanel />}</Card>
+      <Card variant="borderless">{tab === 'config' ? <PaymentConfigPanel /> : <PaymentOrdersPanel />}</Card>
     </div>
   );
 }

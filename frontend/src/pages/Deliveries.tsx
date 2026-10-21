@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useState } from 'react';
-import {
-  Alert, Button, Card, Descriptions, Drawer, Form, Input, InputNumber, Modal, Popconfirm,
-  Select, Space, Table, Tag, Tooltip, Typography, message,
+import { Alert, Button, Card, Descriptions, Drawer, Form, Input, InputNumber, Modal, Popconfirm,
+  Select, Space, Table, Tooltip, Typography, message,
 } from 'antd';
 import { CopyOutlined, DeleteOutlined, LinkOutlined, LockOutlined, ReloadOutlined } from '@ant-design/icons';
 import { api, toastError } from '@/api/client';
 import type { Delivery, DeliveryView } from '@/api/types';
 import { copyText, fmtTime, untilText } from '@/utils/format';
 import { useAuth } from '@/auth/AuthContext';
+import { PageHeader, StatusTag } from '@/admin/ui';
 
 export default function Deliveries() {
   const { isAdmin } = useAuth();
@@ -102,16 +102,12 @@ export default function Deliveries() {
 
   return (
     <>
-      <div className="page-head">
-        <div>
-          <h2 className="page-title">提货链接</h2>
-          <p className="page-desc">
-            链接本身就是凭证，请勿随意外发。过期后仍会展示联系方式，方便买家联系补发。
-          </p>
-        </div>
-      </div>
+      <PageHeader
+        title="提货链接"
+        desc="链接本身就是凭证，请勿随意外发。过期后仍会展示联系方式，方便买家联系补发"
+      />
 
-      <Card size="small">
+      <Card size="small" variant="borderless">
         <div className="table-toolbar">
           <Input.Search
             placeholder="按订单号搜索"
@@ -159,42 +155,58 @@ export default function Deliveries() {
           rowKey="id"
           loading={loading}
           dataSource={rows}
-          scroll={{ x: 960 }}
+          scroll={{ x: 1000 }}
           pagination={{ current: page, pageSize: 20, total, onChange: setPage, showTotal: (t) => `共 ${t} 条` }}
           columns={[
             {
               title: '订单号',
               dataIndex: 'order_no',
-              width: 200,
-              render: (v) => v || '-',
+              // 43 位订单号在 200px 里必然折行，行高会被撑到两倍。
+              // 改成等宽单行 + 省略 + 悬停/点击复制。
+              width: 250,
+              render: (v: string) =>
+                v ? (
+                  <Tooltip title="点击复制订单号">
+                    <Typography.Text className="a-code" style={{ maxWidth: 220 }} copyable={{ text: v, tooltips: ['复制', '已复制'] }}>
+                      {v}
+                    </Typography.Text>
+                  </Tooltip>
+                ) : (
+                  <span className="a-cell-sub">-</span>
+                ),
             },
             { title: '商品', dataIndex: 'goods_name', ellipsis: true },
             {
               title: '状态',
-              width: 110,
+              width: 100,
               render: (_, r) => {
-                if (r.status === 'revoked') return <Tag>已作废</Tag>;
-                return r.expired ? <Tag color="warning">已过期</Tag> : <Tag color="success">有效</Tag>;
+                if (r.status === 'revoked') return <StatusTag tone="neutral" dot>已作废</StatusTag>;
+                return r.expired ? <StatusTag tone="danger" dot>已过期</StatusTag> : <StatusTag tone="success" dot>有效</StatusTag>;
               },
             },
             {
               title: '有效期',
-              width: 170,
+              width: 150,
               render: (_, r) => (
                 <Tooltip title={fmtTime(r.expires_at)}>
-                  <span>{untilText(r.expires_at)}</span>
+                  <span className="a-nowrap">{untilText(r.expires_at)}</span>
                 </Tooltip>
               ),
             },
             {
               title: '访问',
-              width: 90,
-              render: (_, r) => `${r.view_count} 次`,
+              width: 80,
+              align: 'right' as const,
+              render: (_, r) => (
+                <span className="a-num" style={{ color: r.view_count > 0 ? 'var(--a-ink-2)' : 'var(--a-ink-4)' }}>
+                  {r.view_count} 次
+                </span>
+              ),
             },
             {
               title: '操作',
-              width: 200,
-              fixed: 'right',
+              width: 190,
+              fixed: 'right' as const,
               render: (_, r) => (
                 <Space size={4}>
                   <Button size="small" type="link" onClick={() => void openDetail(r.id)}>

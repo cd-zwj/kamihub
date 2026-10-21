@@ -16,6 +16,7 @@ import { fmtTime, money, yuan } from '@/utils/format';
 import { useAuth } from '@/auth/AuthContext';
 import CardPoolDrawer from '@/components/CardPoolDrawer';
 import ImageUploader from '@/components/ImageUploader';
+import { CountTag, Money, PageHeader, StatusTag } from '@/admin/ui';
 
 /** 供货方式：向上游平台采购（默认） / 用商品自带的卡密池发货 */
 const STOCK_MODE_UPSTREAM = 1;
@@ -105,7 +106,9 @@ export default function GoodsPage() {
       routing_strategy: 'priority',
       failover_enabled: true,
       max_attempts: 3,
-      max_quantity: 1,
+      // 0 = 不限购。默认必须是 0：以前默认 1，新建商品会静默变成
+      // 「限购 1 件」，买家买 2 件就会被拦下（表现为发货失败、钱退回余额）。
+      max_quantity: 0,
       price: 0,
       max_supply_price: 0,
       cost_price: 0,
@@ -384,21 +387,19 @@ export default function GoodsPage() {
 
   return (
     <>
-      <div className="page-head">
-        <div>
-          <h2 className="page-title">商品与货源</h2>
-          <p className="page-desc">
-            一个商品可以挂多个平台的货源。下单时按所选策略排序，主货源失败自动切下一个。
-          </p>
-        </div>
-        {isAdmin && (
-          <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
-            新增商品
-          </Button>
-        )}
-      </div>
+      <PageHeader
+        title="商品与货源"
+        desc="一个商品可以挂多个平台的货源，下单时按所选策略排序，主货源失败自动切下一个"
+        extra={
+          isAdmin && (
+            <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
+              新增商品
+            </Button>
+          )
+        }
+      />
 
-      <Card size="small">
+      <Card size="small" variant="borderless">
         <div className="table-toolbar">
           <Input.Search
             placeholder="搜索商品编号 / 名称"
@@ -418,88 +419,125 @@ export default function GoodsPage() {
           rowKey="id"
           loading={loading}
           dataSource={rows}
-          scroll={{ x: 1000 }}
+          scroll={{ x: 1080 }}
           pagination={{ current: page, pageSize: 20, total, onChange: setPage, showTotal: (t) => `共 ${t} 条` }}
           columns={[
             {
+              // 商品名 + 编号 + 上下架合成一列。改版前「上架」Tag 挤在商品名右边，
+              // 长名字会被折成 3 行；现在状态放独立的窄列，商品名单行省略。
               title: '商品',
+              width: 260,
               render: (_, r) => (
-                <Space direction="vertical" size={0}>
-                  <Space size={6}>
-                    <span style={{ fontWeight: 600 }}>{r.name}</span>
-                    {r.status === 1 ? <Tag color="success">上架</Tag> : <Tag>下架</Tag>}
-                  </Space>
-                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                    {r.code}
-                  </Typography.Text>
-                </Space>
+                <div className="a-cell-main">
+                  <Tooltip title={r.name}>
+                    <span className="a-nowrap" style={{ fontWeight: 600, color: 'var(--a-ink)', maxWidth: 178, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      {r.name}
+                    </span>
+                  </Tooltip>
+                  <span className="a-cell-sub">{r.code}</span>
+                </div>
               ),
             },
-            { title: '售价', dataIndex: 'price', width: 100, render: (v) => yuan(v) },
+            {
+              title: '状态',
+              width: 80,
+              render: (_, r) =>
+                r.status === 1 ? (
+                  <StatusTag tone="success" dot>
+                    上架
+                  </StatusTag>
+                ) : (
+                  <StatusTag tone="neutral" dot>
+                    下架
+                  </StatusTag>
+                ),
+            },
+            {
+              title: '售价',
+              width: 96,
+              align: 'right' as const,
+              // 0 元的商品通常是占位/未定价，显示成 ¥0.00 会让人以为是免费
+              render: (_, r) =>
+                Number(r.price) > 0 ? (
+                  <Money value={yuan(r.price)} prefix="" />
+                ) : (
+                  <Tooltip title="尚未定价，买家侧不会展示为免费商品">
+                    <span className="a-cell-sub" style={{ color: 'var(--a-warning-fg)' }}>
+                      未定价
+                    </span>
+                  </Tooltip>
+                ),
+            },
             {
               // 供货方式决定了这个商品是怎么发货的，摆在最前面
               title: '供货方式',
-              width: 120,
+              width: 104,
               render: (_, r) =>
                 (r.stock_mode ?? STOCK_MODE_UPSTREAM) === STOCK_MODE_LOCAL ? (
-                  <Tooltip title="卡密存在你自己这里，卖出后从卡密池直接发货，不经过任何上游平台">
-                    <Tag color="purple" style={{ cursor: 'help' }}>
-                      {STOCK_MODE_TEXT[2]}
-                    </Tag>
+                  <Tooltip title="卡密存在你自己这里，卖出后从卡密池直接发货">
+                    <StatusTag tone="info">自有卡密</StatusTag>
                   </Tooltip>
                 ) : (
-                  <Tag>{STOCK_MODE_TEXT[1]}</Tag>
+                  <StatusTag tone="neutral">{STOCK_MODE_TEXT[1]}</StatusTag>
                 ),
             },
             {
               // 自建商品看的不是「最高供应价」而是「可售卡密」，
-              // 这两列互斥，合成一列显示才不会出现一整片无意义的横杠。
-              title: '成本 / 库存',
-              width: 150,
+              // 这两列互斥，根据供货方式渲染不同内容 + 标题。
+              title: '库存 / 限价',
+              width: 118,
               render: (_, r) => {
                 if ((r.stock_mode ?? STOCK_MODE_UPSTREAM) === STOCK_MODE_LOCAL) {
                   const avail = r.card_available ?? 0;
                   const total = r.card_total ?? 0;
+                  // 库存是运营最该看的数字，单独给一条细进度条，比 Tag 直观
+                  const pct = total > 0 ? Math.min(100, Math.round((avail / total) * 100)) : 0;
+                  const tone = avail === 0 ? 'danger' : avail <= 3 ? 'warning' : 'success';
+                  const color =
+                    tone === 'danger' ? 'var(--a-danger)' : tone === 'warning' ? 'var(--a-warning)' : 'var(--a-success)';
                   return (
-                    <Space direction="vertical" size={0}>
-                      <Tooltip title={`单条成本 ${yuan(r.cost_price)}，毛利按售价减成本算`}>
-                        <span style={{ cursor: 'help' }}>成本 {yuan(r.cost_price)}</span>
-                      </Tooltip>
-                      <Tooltip title={`卡密池：可售 ${avail} / 合计 ${total}`}>
-                        <Tag color={avail > 0 ? 'success' : 'error'} style={{ cursor: 'help' }}>
-                          可售 {avail}
-                        </Tag>
-                      </Tooltip>
-                    </Space>
+                    <Tooltip title={`卡密池：可售 ${avail} / 合计 ${total}`}>
+                      <div style={{ cursor: 'help' }}>
+                        <div className="a-cell-main" style={{ justifyContent: 'space-between' }}>
+                          <span className="a-num" style={{ fontWeight: 600, color }}>
+                            {avail}
+                          </span>
+                          <span className="a-cell-sub">/ {total}</span>
+                        </div>
+                        <div className="a-rank-track" style={{ height: 4, marginTop: 4 }}>
+                          <div className="a-rank-fill" style={{ width: `${pct}%`, background: color }} />
+                        </div>
+                      </div>
+                    </Tooltip>
                   );
                 }
                 const v = Number(r.max_supply_price ?? 0);
-                if (!v) return <Tag>不限</Tag>;
+                if (!v) return <span className="a-cell-sub">不限</span>;
                 return (
                   <Tooltip title="单笔应付总额超过此价的货源会被跳过">
-                    <Tag color={v < Number(r.price) ? 'error' : 'blue'} style={{ cursor: 'help' }}>
+                    <StatusTag tone={v < Number(r.price) ? 'danger' : 'neutral'}>
                       限价 {yuan(v)}
-                    </Tag>
+                    </StatusTag>
                   </Tooltip>
                 );
               },
             },
             {
               title: '发货方式',
-              width: 100,
-              render: (_, r) => DELIVERY_MODE_TEXT[r.delivery_mode] || '-',
+              width: 88,
+              render: (_, r) => <span className="a-nowrap">{DELIVERY_MODE_TEXT[r.delivery_mode] || '-'}</span>,
             },
             {
               title: '选货策略',
-              width: 170,
+              width: 132,
               render: (_, r) => {
                 // 自有卡密商品没有「选货」这回事，显示策略只会误导运营
                 if ((r.stock_mode ?? STOCK_MODE_UPSTREAM) === STOCK_MODE_LOCAL) {
-                  return <Typography.Text type="secondary">不适用</Typography.Text>;
+                  return <span className="a-cell-sub">不适用</span>;
                 }
                 const s = strategies.find((x) => x.name === r.routing_strategy);
                 return (
-                  <Space size={4}>
+                  <div className="a-cell-main">
                     {/* 显示中文名；鼠标悬停给出完整说明，英文标识只在 tooltip 里出现 */}
                     <Tooltip
                       title={
@@ -512,30 +550,44 @@ export default function GoodsPage() {
                         </span>
                       }
                     >
-                      <Tag color="blue" style={{ cursor: 'help' }}>
-                        {strategyText(r.routing_strategy)}
-                      </Tag>
+                      <StatusTag tone="info">{strategyText(r.routing_strategy)}</StatusTag>
                     </Tooltip>
-                    {!r.failover_enabled && <Tag>不故障转移</Tag>}
-                  </Space>
+                    {!r.failover_enabled && (
+                      <Tooltip title="主货源失败时不自动切换备用货源">
+                        <span className="a-cell-sub" style={{ color: 'var(--a-warning-fg)' }}>
+                          无转移
+                        </span>
+                      </Tooltip>
+                    )}
+                  </div>
                 );
               },
             },
             {
               title: '货源',
-              width: 110,
+              width: 84,
               render: (_, r) => {
                 if ((r.stock_mode ?? STOCK_MODE_UPSTREAM) === STOCK_MODE_LOCAL) {
-                  return <Typography.Text type="secondary">卡密池</Typography.Text>;
+                  return <span className="a-cell-sub">卡密池</span>;
                 }
                 const n = r.supplies?.length ?? 0;
-                return n > 0 ? <Tag color="green">{n} 个</Tag> : <Tag color="warning">未配置</Tag>;
+                return n > 0 ? (
+                  <Tooltip title={`已挂 ${n} 个平台货源`}>
+                    <CountTag>{n} 个</CountTag>
+                  </Tooltip>
+                ) : (
+                  <Tooltip title="这个商品还没有任何货源，下单一定失败">
+                    <StatusTag tone="warning" dot>
+                      未配置
+                    </StatusTag>
+                  </Tooltip>
+                );
               },
             },
             {
               title: '操作',
-              width: 230,
-              fixed: 'right',
+              width: 200,
+              fixed: 'right' as const,
               render: (_, r) => (
                 <Space size={4}>
                   {(r.stock_mode ?? STOCK_MODE_UPSTREAM) === STOCK_MODE_LOCAL ? (
@@ -549,7 +601,7 @@ export default function GoodsPage() {
                   )}
                   {isAdmin && (
                     <>
-                      <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(r)} />
+                      <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(r)} aria-label="编辑" />
                       <Popconfirm
                         title="确认删除该商品？"
                         description="已有订单的商品不能删除，请改为下架。"
@@ -557,7 +609,7 @@ export default function GoodsPage() {
                         okText="删除"
                         cancelText="取消"
                       >
-                        <Button size="small" danger icon={<DeleteOutlined />} />
+                        <Button size="small" danger icon={<DeleteOutlined />} aria-label="删除" />
                       </Popconfirm>
                     </>
                   )}
@@ -656,8 +708,21 @@ export default function GoodsPage() {
                 ]}
               />
             </Form.Item>
-            <Form.Item name="max_quantity" label="单次数量上限" style={{ width: 150 }}>
-              <InputNumber min={1} max={10000} style={{ width: '100%' }} />
+            <Form.Item
+              name="max_quantity"
+              label="单次数量上限"
+              style={{ width: 200 }}
+              extra="0 = 不限购；填 N 表示单次最多买 N 件（商城会按此限制购买数量）"
+              rules={[
+                {
+                  validator: (_, v) =>
+                    v === undefined || v === null || Number(v) >= 0
+                      ? Promise.resolve()
+                      : Promise.reject(new Error('不能为负数，0 表示不限购')),
+                },
+              ]}
+            >
+              <InputNumber min={0} max={10000} style={{ width: '100%' }} />
             </Form.Item>
             {stockMode !== STOCK_MODE_LOCAL && (
               <Form.Item

@@ -12,6 +12,7 @@ import {
 } from '@/api/types';
 import { copyText, fmtTime, money, newRequestId, untilText, yuan } from '@/utils/format';
 import { useAuth } from '@/auth/AuthContext';
+import { CountTag, Money, PageHeader, StatusTag, toneOf } from '@/admin/ui';
 
 export default function Orders() {
   const { isAdmin } = useAuth();
@@ -194,19 +195,19 @@ export default function Orders() {
 
   return (
     <>
-      <div className="page-head">
-        <div>
-          <h2 className="page-title">订单</h2>
-          <p className="page-desc">每次采购都会记录实际成交的货源、尝试过程与提货链接。</p>
-        </div>
-        {isAdmin && (
-          <Button type="primary" icon={<PlusOutlined />} onClick={() => setBuyOpen(true)}>
-            手工下单
-          </Button>
-        )}
-      </div>
+      <PageHeader
+        title="订单"
+        desc="每次采购都会记录实际成交的货源、尝试过程与提货链接"
+        extra={
+          isAdmin && (
+            <Button type="primary" icon={<PlusOutlined />} onClick={() => setBuyOpen(true)}>
+              手工下单
+            </Button>
+          )
+        }
+      />
 
-      <Card size="small">
+      <Card size="small" variant="borderless">
         <div className="table-toolbar">
           <Input.Search
             placeholder="订单号 / request_id / 上游单号"
@@ -220,7 +221,7 @@ export default function Orders() {
           <Select
             placeholder="全部状态"
             allowClear
-            style={{ width: 150 }}
+            style={{ width: 140 }}
             value={status}
             onChange={(v) => {
               setPage(1);
@@ -241,94 +242,99 @@ export default function Orders() {
           rowKey="id"
           loading={loading}
           dataSource={rows}
-          scroll={{ x: 1000 }}
-          pagination={{ current: page, pageSize: 20, total, onChange: setPage, showTotal: (t) => `共 ${t} 条` }}
+          scroll={{ x: 1060 }}
+          pagination={{
+            current: page,
+            pageSize: 20,
+            total,
+            onChange: setPage,
+            showTotal: (t) => `共 ${t} 条`,
+          }}
           columns={[
             {
               title: '订单号',
               dataIndex: 'order_no',
-              width: 230,
-              render: (v, r) => (
-                <Space direction="vertical" size={0}>
-                  <Typography.Text copyable={{ text: v }} style={{ fontSize: 13 }}>
-                    {v}
-                  </Typography.Text>
-                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                    {fmtTime(r.created_at)}
-                  </Typography.Text>
-                </Space>
+              // 改版前这里只有 230px，且用 Space 纵向排列 → 订单号折成两行、
+              // 时间再占一行，行高被撑到 78px，一屏只能看半页。
+              // 现在订单号等宽单行 + 时间同行右对齐，行高回到 ~54px。
+              width: 268,
+              render: (v: string, r) => (
+                <div className="a-cell-main">
+                  <Tooltip title="点击复制订单号">
+                    <Typography.Text className="a-code" style={{ maxWidth: 200 }} copyable={{ text: v, tooltips: ['复制', '已复制'] }}>
+                      {v}
+                    </Typography.Text>
+                  </Tooltip>
+                  <span className="a-cell-sub">{fmtTime(r.created_at).slice(5)}</span>
+                </div>
               ),
             },
             {
               title: '商品',
+              width: 180,
               render: (_, r) => (
-                <Space direction="vertical" size={0}>
-                  <span>{r.goods?.name || `#${r.goods_id}`}</span>
-                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                <span className="a-nowrap" title={r.goods?.name || `#${r.goods_id}`}>
+                  {r.goods?.name || `#${r.goods_id}`}
+                  <span className="a-cell-sub" style={{ marginLeft: 6 }}>
                     ×{r.quantity}
-                  </Typography.Text>
-                </Space>
+                  </span>
+                </span>
               ),
             },
             {
               title: '成交货源',
-              width: 150,
+              width: 160,
               render: (_, r) =>
                 r.platform ? (
-                  <Space direction="vertical" size={0}>
-                    <span>{r.platform.name}</span>
-                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                      {r.platform_trade_no || '-'}
-                    </Typography.Text>
-                  </Space>
+                  <div className="a-cell-main">
+                    <span className="a-nowrap">{r.platform.name}</span>
+                    <span className="a-cell-sub">{r.platform_trade_no || '-'}</span>
+                  </div>
                 ) : (
-                  <Tag>未成交</Tag>
+                  <StatusTag tone="neutral">未成交</StatusTag>
                 ),
             },
             {
               title: '金额',
-              width: 100,
-              render: (_, r) => yuan(r.total_amount),
+              width: 96,
+              align: 'right' as const,
+              render: (_, r) => <Money value={yuan(r.total_amount)} prefix="" />,
             },
             {
               title: '状态',
-              width: 110,
+              width: 128,
               render: (_, r) => (
-                <Space direction="vertical" size={2}>
-                  <Tag color={ORDER_STATUS_COLOR[r.status] || 'default'}>
+                <div className="a-cell-main">
+                  <StatusTag tone={toneOf(r.status)} dot>
                     {ORDER_STATUS_TEXT[r.status] || r.status}
-                  </Tag>
-                  {r.attempts > 1 && (
-                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                      尝试 {r.attempts} 个货源
-                    </Typography.Text>
-                  )}
-                </Space>
+                  </StatusTag>
+                  {r.attempts > 1 && <span className="a-cell-sub">{r.attempts} 个货源</span>}
+                </div>
               ),
             },
             {
               title: '卡密',
-              width: 80,
-              render: (_, r) => (r.card_count ? <Tag color="green">{r.card_count} 张</Tag> : '-'),
+              width: 74,
+              render: (_, r) => (r.card_count ? <CountTag>{r.card_count} 张</CountTag> : <span className="a-cell-sub">-</span>),
             },
             {
               title: '提货链接',
-              width: 110,
+              width: 100,
               render: (_, r) =>
                 r.delivery ? (
                   <Tooltip title={untilText(r.delivery.expires_at)}>
-                    <Tag color={r.delivery.status === 'active' ? 'blue' : 'default'} icon={<LinkOutlined />}>
+                    <StatusTag tone={r.delivery.status === 'active' ? 'success' : 'neutral'} dot>
                       {r.delivery.status === 'active' ? '有效' : '已作废'}
-                    </Tag>
+                    </StatusTag>
                   </Tooltip>
                 ) : (
-                  '-'
+                  <span className="a-cell-sub">-</span>
                 ),
             },
             {
               title: '操作',
-              width: 90,
-              fixed: 'right',
+              width: 76,
+              fixed: 'right' as const,
               render: (_, r) => (
                 <Button size="small" type="link" onClick={() => void openDetail(r.id)}>
                   详情

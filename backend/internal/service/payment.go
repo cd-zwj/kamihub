@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"strconv"
 	"strings"
 	"time"
 
@@ -44,10 +45,13 @@ type PaymentService struct {
 	cfg      *config.Config
 	settings *SettingsService
 	wallet   *WalletService
+	// shopOrders 用于「直付购卡」：算权威价格 + 付款成功后自动下单发货。
+	// 依赖方向只有 PaymentService → ShopOrderService，不会成环。
+	shopOrders *ShopOrderService
 }
 
-func NewPaymentService(db *gorm.DB, cfg *config.Config, settings *SettingsService, wallet *WalletService) *PaymentService {
-	return &PaymentService{db: db, cfg: cfg, settings: settings, wallet: wallet}
+func NewPaymentService(db *gorm.DB, cfg *config.Config, settings *SettingsService, wallet *WalletService, shopOrders *ShopOrderService) *PaymentService {
+	return &PaymentService{db: db, cfg: cfg, settings: settings, wallet: wallet, shopOrders: shopOrders}
 }
 
 // ---------------------------------------------------------------- 配置
@@ -62,6 +66,7 @@ func (s *PaymentService) Config(ctx context.Context) (PaymentSettings, epay.Conf
 		SubmitPath: p.SubmitPath,
 		MapIPath:   p.MapIPath,
 		QueryPath:  p.QueryPath,
+		Gateway:    p.Gateway,
 	}
 }
 
@@ -96,7 +101,20 @@ func (s *PaymentService) PublicInfo(ctx context.Context) PublicInfo {
 
 // ---------------------------------------------------------------- 创建支付
 
-// CreatePayInput 发起充值
+// CreatePayIntent 直付购卡的购买意图。
+//
+// 传了它，这笔支付就不再是「充值」，而是「直接买这一单商品」：
+//   - 金额由服务端按商品当前售价算（前端传的 Amount 会被覆盖）
+//   - 付款成功后自动下单发货，钱会先入余额再立即被这一单扣掉
+//   - 万一发货失败，钱留在余额里，买家拿到明确提示后可以稍后重下
+type CreatePayIntent struct {
+	ListingID uint
+	Quantity  int
+	// RequestID 前端生成的幂等键，自动下单时复用同一个值
+	RequestID string
+}
+
+// CreatePayInput 发起充值/直付购卡
 type CreatePayInput struct {
 	BuyerID  uint
 	Amount   decimal.Decimal
@@ -104,6 +122,8 @@ type CreatePayInput struct {
 	ClientIP string
 	// UseAPI true 用 mapi.php（返回二维码），false 用 submit.php（页面跳转）
 	UseAPI bool
+	// Intent 非空表示这是「直付购卡」而不是充值
+	Intent *CreatePayIntent
 }
 
 // CreatePayResult 返回给前端
@@ -117,7 +137,11 @@ type CreatePayResult struct {
 	Qrcode string `json:"qrcode,omitempty"`
 	// ExpiresAt 支付单过期时间
 	ExpiresAt time.Time `json:"expires_at"`
-	Amount    string    `json:"amount"`
+	// Amount 实际下单金额。直付购卡时这里是服务端算出来的权威金额，
+	// 前端应当用它展示「应付金额」，不要继续用自己算的值。
+	Amount string `json:"amount"`
+	// Purpose recharge / order，便于前端区分后续展示逻辑
+	Purpose string `json:"purpose"`
 }
 
 // CreatePay 创建一笔支付单并向易支付下单。
@@ -128,6 +152,33 @@ func (s *PaymentService) CreatePay(ctx context.Context, in CreatePayInput) (*Cre
 	}
 	if !epayCfg.Ready() {
 		return nil, ErrPaymentDisabled
+	}
+
+	// ---- 直付购卡：金额一律用服务端算出来的权威价格 ----
+	//
+	// 这里刻意不信任 in.Amount：前端能改，改完就能用 0.01 元把 7.5 元的商品买走。
+	// Quote 走的是 ListingService.BuyerQuote，和买家自助下单用的是同一套定价，
+	// 所以「支付金额」和「下单金额」必然一致，不存在两边价格对不上的缝隙。
+	purpose := models.PaymentPurposeRecharge
+	var intentQuote *ShopQuote
+	if in.Intent != nil {
+		if s.shopOrders == nil {
+			return nil, ErrPaymentDisabled
+		}
+		q, err := s.shopOrders.Quote(ctx, in.Intent.ListingID, in.Intent.Quantity)
+		if err != nil {
+			return nil, err
+		}
+		intentQuote = q
+		purpose = models.PaymentPurposeOrder
+		if in.Amount.IsPositive() && !in.Amount.Round(2).Equal(q.Total) {
+			// 前端按自己看到的售价算金额是正常的（比如商品刚调过价），
+			// 但差值过大就值得留一条告警，便于发现有人在改前端。
+			slog.Warn("直付购卡前端金额与服务端不一致，已按服务端价格下单",
+				"buyer_id", in.BuyerID, "listing_id", q.ListingID,
+				"client_amount", in.Amount.String(), "server_amount", q.Total.String())
+		}
+		in.Amount = q.Total
 	}
 
 	// ---- 金额校验 ----
@@ -152,9 +203,13 @@ func (s *PaymentService) CreatePay(ctx context.Context, in CreatePayInput) (*Cre
 
 	// ---- 限制进行中的支付单数量 ----
 	// 防止有人刷单一口气创建几千条，把上游接口和本地表打爆
+	// 只统计「仍然有效」的 pending 单：已过 expires_at 的不该再占额度。
+	// 这是一道兜底 —— 巡检任务若被停掉或进程刚重启，
+	// 过期单也不会把买家卡死在 ErrPaymentTooMany 上。
 	var pending int64
 	if err := s.db.WithContext(ctx).Model(&models.PaymentOrder{}).
-		Where("buyer_id = ? AND status = ?", in.BuyerID, models.PaymentStatusPending).
+		Where("buyer_id = ? AND status = ? AND expires_at > ?",
+			in.BuyerID, models.PaymentStatusPending, time.Now()).
 		Count(&pending).Error; err != nil {
 		return nil, err
 	}
@@ -174,7 +229,22 @@ func (s *PaymentService) CreatePay(ctx context.Context, in CreatePayInput) (*Cre
 		PayType:   payType,
 		Status:    models.PaymentStatusPending,
 		ExpiresAt: expiresAt,
+		Purpose:   purpose,
 		Remark:    "在线支付充值",
+	}
+	if purpose == models.PaymentPurposeOrder {
+		listingID := intentQuote.ListingID
+		po.ListingID = &listingID
+		po.Quantity = intentQuote.Quantity
+		// 幂等键必须在「同一笔意图的重试」之间保持稳定，
+		// 否则回调重复到达就会重复下单。前端给了 request_id 就用它，
+		// 没给就退回商户订单号（本身唯一），保证一定有稳定的键。
+		reqID := strings.TrimSpace(in.Intent.RequestID)
+		if reqID == "" {
+			reqID = tradeNo
+		}
+		po.PurchaseRequestID = truncateStr("pay-auto:"+reqID, 128)
+		po.Remark = fmt.Sprintf("直付购卡 %s × %d", intentQuote.Title, intentQuote.Quantity)
 	}
 	if err := s.db.WithContext(ctx).Create(&po).Error; err != nil {
 		return nil, fmt.Errorf("创建支付单失败：%w", err)
@@ -182,11 +252,18 @@ func (s *PaymentService) CreatePay(ctx context.Context, in CreatePayInput) (*Cre
 
 	// ---- 向上游下单 ----
 	notifyURL := s.resolveNotifyURL(pay)
-	returnURL := s.resolveReturnURL(pay)
+	returnURL := s.resolveReturnURL(pay, purpose, tradeNo)
 
 	orderName := fmt.Sprintf("%s 余额充值", pay.SiteName)
 	if orderName == " 余额充值" {
 		orderName = "余额充值"
+	}
+	if purpose == models.PaymentPurposeOrder {
+		// 收银台和易支付账单上直接显示买的是什么，买家好核对
+		orderName = fmt.Sprintf("%s ×%d", truncateStr(intentQuote.Title, 40), intentQuote.Quantity)
+		if site := strings.TrimSpace(pay.SiteName); site != "" {
+			orderName = site + " " + orderName
+		}
 	}
 
 	createIn := epay.CreateInput{
@@ -200,13 +277,11 @@ func (s *PaymentService) CreatePay(ctx context.Context, in CreatePayInput) (*Cre
 		Sitename:  pay.SiteName,
 	}
 
-	var res *epay.CreateResult
-	var err error
-	if in.UseAPI {
-		res, err = epay.CreateAPI(ctx, epayCfg, createIn)
-	} else {
-		res, err = epay.CreatePagePay(ctx, epayCfg, createIn)
-	}
+	// 按配置里的「接入方式」下单：
+	//   - 标准易支付（默认）：submit.php 返回自动提交表单 —— 原有路径，行为不变
+	//   - 302 跳转式：submit.php 302 到收银台，Location 就是支付地址
+	// 两者的差异（以及字段转换）都封装在 epay 包里，这里只负责传 useAPI。
+	res, err := epay.Create(ctx, epayCfg, createIn, in.UseAPI)
 	if err != nil {
 		// 上游下单失败：把本地支付单标为失败，避免留下永远 pending 的垃圾单
 		_ = s.db.WithContext(ctx).Model(&models.PaymentOrder{}).
@@ -226,7 +301,7 @@ func (s *PaymentService) CreatePay(ctx context.Context, in CreatePayInput) (*Cre
 		}).Error
 
 	slog.Info("创建支付单", "trade_no", tradeNo, "buyer_id", in.BuyerID,
-		"amount", amount.String(), "pay_type", payType)
+		"amount", amount.String(), "pay_type", payType, "purpose", purpose)
 
 	return &CreatePayResult{
 		TradeNo:   tradeNo,
@@ -235,6 +310,7 @@ func (s *PaymentService) CreatePay(ctx context.Context, in CreatePayInput) (*Cre
 		Qrcode:    res.Qrcode,
 		ExpiresAt: expiresAt,
 		Amount:    amount.String(),
+		Purpose:   purpose,
 	}, nil
 }
 
@@ -298,6 +374,8 @@ func (s *PaymentService) HandleNotify(ctx context.Context, params map[string]str
 	// 锁支付单 → 校验状态与金额 → 写钱包流水 → 加余额 → 置为已支付
 	var handled bool
 	var reason string
+	// poID: 事务内取到的支付单 ID，供事务提交后触发自动发货使用
+	var poID uint
 
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var po models.PaymentOrder
@@ -311,6 +389,9 @@ func (s *PaymentService) HandleNotify(ctx context.Context, params map[string]str
 			}
 			return err
 		}
+
+		// poID 供事务提交后触发自动发货使用
+		poID = po.ID
 
 		// 记回调次数与原文，保留排障证据
 		now := time.Now()
@@ -397,6 +478,20 @@ func (s *PaymentService) HandleNotify(ctx context.Context, params map[string]str
 		// 数据库层面的临时故障，让上游重试
 		return NotifyResult{Handled: false, Reason: "内部错误：" + err.Error()}
 	}
+	// ---- 付款后自动下单 ----
+	//
+	// 必须在入账事务提交之后调用，理由与 settlePaid 中一致：
+	// 钱先安全落进余额，再独立地尝试发货，两者解耦。
+	//
+	// 这里曾经缺失，导致走异步回调的「直付购卡」订单只入账不发货，
+	// 买家的钱静静躺在余额里、订单压根没生成（前端不回轮询就永远补不上）。
+	// dispatchPaidOrder 自身幂等：order_id / auto_order_error 双闸，
+	// 加上 PurchaseRequestID 稳定 + 订单 request_id 唯一索引兜底，
+	// 因此与 settlePaid(主动查单) 路径并发到达也安全。
+	if handled {
+		s.dispatchPaidOrder(ctx, poID)
+	}
+
 	return NotifyResult{Handled: handled, Reason: reason}
 }
 
@@ -474,7 +569,9 @@ func (s *PaymentService) settlePaid(ctx context.Context, po *models.PaymentOrder
 		return fmt.Errorf("上游金额格式非法：%s", moneyStr)
 	}
 
-	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	// 注意：这里是赋值而不是 return —— 入账事务提交之后还要接着跑
+	// 「付款后自动下单」，用 return 会把后面的逻辑变成永远不可达的死代码。
+	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var cur models.PaymentOrder
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 			First(&cur, po.ID).Error; err != nil {
@@ -534,6 +631,232 @@ func (s *PaymentService) settlePaid(ctx context.Context, po *models.PaymentOrder
 			"trade_no", cur.TradeNo, "amount", cur.Amount.String(), "source", source)
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+
+	// 入账事务提交之后，再跑「付款后自动下单」。
+	//
+	// 必须放在事务外，原因有两个：
+	//  1. 下单走 ShopOrderService，它要读买家余额并写订单/钱包流水。
+	//     塞进同一个事务会拉长持锁时间，还容易踩到互相等待。
+	//  2. 更重要：下单失败绝不能把「已经收到的钱」一起回滚掉。
+	//     钱先安全落进余额，再独立地尝试发货，这两件事必须解耦。
+	s.dispatchPaidOrder(ctx, po.ID)
+	return nil
+}
+
+// ---------------------------------------------------------------- 付款后自动下单
+
+// PaidDispatchResult 直付购卡的发货结果，返回给前端渲染。
+type PaidDispatchResult struct {
+	// Attempted 是否已经尝试过自动发货
+	Attempted bool `json:"attempted"`
+	// OK 发货是否成功
+	OK bool `json:"ok"`
+	// Message 给买家看的说明（发货失败时的兜底文案就在这里）
+	Message string `json:"message,omitempty"`
+	// Order 发货成功时的订单结果（含卡密、提货链接）
+	Order *ShopPurchaseResult `json:"order,omitempty"`
+}
+
+// 自动发货失败时给买家看的文案。
+//
+// 这句话必须存在：买家刚付完钱却没拿到货，得立刻知道「钱没丢、
+// 进了余额、可以稍后重下」，否则就会被当成卷款跑路。
+const autoOrderFailedMessage = "当前商品发货失败，钱已自动进入余额，请稍等后下单"
+
+// autoOrderFailHint 把自动发货的原始错误翻译成买家看得懂的提示。
+//
+// po.AutoOrderError 里存的是内部/上游口径（例如「数量超过该商品上限：最大 1」），
+// 直接透给买家既看不懂，又容易被误当成「卖家缺货」——运营去查上游明明有货，
+// 买家却被告知「发货失败」，两边都被误导。
+//
+// 这里按类别翻译，并统一带上「钱已退回余额」的安抚，避免买家以为钱丢了。
+// 认不出的错误一律用兜底文案，不把内部细节暴露给买家。
+func autoOrderFailHint(raw string) string {
+	const tail = "钱已自动退回余额，可以调整后重新下单。"
+	s := strings.TrimSpace(raw)
+	switch {
+	case s == "":
+		return autoOrderFailedMessage
+	case strings.Contains(s, "数量超过该商品上限"),
+		strings.Contains(s, "最多购买"),
+		strings.Contains(s, "超出购买上限"):
+		if n := firstIntIn(s); n > 0 {
+			return "该商品单次最多购买 " + strconv.Itoa(n) + " 件，请调整数量后重新下单。" + tail
+		}
+		return "购买数量超过该商品的单次上限，请调整数量后重新下单。" + tail
+	case strings.Contains(s, "最少购买"), strings.Contains(s, "起购"):
+		return "购买数量未达该商品的起购数量，请调整后重新下单。" + tail
+	case strings.Contains(s, "售罄"), strings.Contains(s, "无库存"), strings.Contains(s, "库存不足"):
+		return "商品暂时缺货，本次没有发货。" + tail
+	case strings.Contains(s, "下架"), strings.Contains(s, "不存在"):
+		return "商品已下架或暂不可购买。" + tail
+	case strings.Contains(s, "余额不足"):
+		return "平台备货账户余额不足，我们正在处理。" + tail
+	}
+	return autoOrderFailedMessage
+}
+
+// firstIntIn 取字符串里第一段连续数字，用于从错误文案里还原限购件数。
+func firstIntIn(s string) int {
+	start := -1
+	for i := 0; i < len(s); i++ {
+		if s[i] >= '0' && s[i] <= '9' {
+			if start < 0 {
+				start = i
+			}
+			continue
+		}
+		if start >= 0 {
+			if n, err := strconv.Atoi(s[start:i]); err == nil {
+				return n
+			}
+			start = -1
+		}
+	}
+	if start >= 0 {
+		if n, err := strconv.Atoi(s[start:]); err == nil {
+			return n
+		}
+	}
+	return 0
+}
+
+// dispatchPaidOrder 付款成功后自动下单发货。
+//
+// 触发时机：支付单被确认收款，且用途是「直付购卡」。
+//
+// 幂等设计是这一段最需要小心的地方：
+//   - 易支付的异步回调和我们自己的「主动查单」会并发到达，
+//     所以本方法一定会在同一笔支付上被调用多次。
+//   - OrderID 非空 → 已经发过货，直接返回，绝不重复下单。
+//   - AutoOrderError 非空 → 上次试过且失败了，钱已安全躺在余额里，
+//     这里不再自动重试（否则上游挂掉时会被反复捶），
+//     买家点「重新下单」时走正常下单流程即可。
+//   - 真正下单用的 PurchaseRequestID 是稳定的，即使上面两道闸都被撞穿，
+//     钱包流水的 request_id 唯一索引 + 订单的 request_id 唯一索引
+//     也会挡住重复扣款和重复采购。
+func (s *PaymentService) dispatchPaidOrder(ctx context.Context, paymentID uint) {
+	if s.shopOrders == nil {
+		return
+	}
+
+	var po models.PaymentOrder
+	if err := s.db.WithContext(ctx).First(&po, paymentID).Error; err != nil {
+		slog.Error("自动发货读取支付单失败", "payment_id", paymentID, "error", err.Error())
+		return
+	}
+	if po.Purpose != models.PaymentPurposeOrder || po.Status != models.PaymentStatusPaid {
+		return
+	}
+	if po.OrderID != nil || po.AutoOrderError != "" {
+		return // 已发货 / 已失败过，都不再动
+	}
+	if po.ListingID == nil {
+		slog.Error("直付购卡支付单缺少 listing_id，无法自动发货", "trade_no", po.TradeNo)
+		s.markAutoOrder(ctx, po.ID, nil, "支付单缺少商品信息")
+		return
+	}
+
+	qty := po.Quantity
+	if qty <= 0 {
+		qty = 1
+	}
+	reqID := strings.TrimSpace(po.PurchaseRequestID)
+	if reqID == "" {
+		reqID = "pay-auto:" + po.TradeNo
+	}
+
+	res, err := s.shopOrders.Purchase(ctx, ShopPurchaseInput{
+		BuyerID:   po.BuyerID,
+		ListingID: *po.ListingID,
+		Quantity:  qty,
+		RequestID: reqID,
+	})
+	if err != nil {
+		slog.Error("直付购卡自动发货失败，金额已留在余额",
+			"trade_no", po.TradeNo, "buyer_id", po.BuyerID,
+			"listing_id", *po.ListingID, "amount", po.Amount.String(), "error", err.Error())
+		s.markAutoOrder(ctx, po.ID, nil, err.Error())
+		return
+	}
+
+	slog.Info("直付购卡自动发货成功",
+		"trade_no", po.TradeNo, "order_no", res.OrderNo, "buyer_id", po.BuyerID)
+	s.markAutoOrder(ctx, po.ID, &res.OrderID, "")
+}
+
+// markAutoOrder 记录自动发货的结果（成功记订单，失败记原因）。
+func (s *PaymentService) markAutoOrder(ctx context.Context, paymentID uint, orderID *uint, errMsg string) {
+	updates := map[string]any{
+		"auto_order_at": time.Now(),
+	}
+	if orderID != nil {
+		updates["order_id"] = *orderID
+		updates["auto_order_error"] = ""
+	} else {
+		updates["auto_order_error"] = truncateStr(errMsg, 512)
+	}
+	if err := s.db.WithContext(ctx).Model(&models.PaymentOrder{}).
+		Where("id = ?", paymentID).Updates(updates).Error; err != nil {
+		slog.Error("记录自动发货结果失败", "payment_id", paymentID, "error", err.Error())
+	}
+}
+
+// DispatchResult 把「付款后自动发货」的结果整理成前端要的形态。
+//
+// 前端轮询支付状态时把它一起返回：买家不用自己再点一次下单，
+// 页面上直接就能看到卡密，或者看到「发货失败、钱在余额」的提示。
+// 非「直付购卡」的支付单返回 nil，充值流程完全不受影响。
+func (s *PaymentService) DispatchResult(ctx context.Context, po *models.PaymentOrder) *PaidDispatchResult {
+	if po == nil || po.Purpose != models.PaymentPurposeOrder {
+		return nil
+	}
+
+	out := &PaidDispatchResult{
+		Attempted: po.Status == models.PaymentStatusPaid && po.AutoOrderAt != nil,
+		OK:        po.OrderID != nil,
+	}
+	if po.OrderID == nil {
+		if po.Status == models.PaymentStatusPaid {
+			if out.Attempted {
+				// 已经试过且失败：钱在余额里，按真实原因给买家可读提示
+				out.Message = autoOrderFailHint(po.AutoOrderError)
+			} else {
+				out.Message = "支付已到账，正在自动发货，请稍候…"
+			}
+		}
+		return out
+	}
+
+	var order models.Order
+	if err := s.db.WithContext(ctx).Preload("Goods").Preload("Delivery").
+		First(&order, *po.OrderID).Error; err != nil {
+		out.Message = "支付已到账，订单信息读取失败，请到「我的订单」查看"
+		return out
+	}
+	v := toShopOrderView(&order)
+	out.Order = &ShopPurchaseResult{
+		OrderNo:     v.OrderNo,
+		OrderID:     v.ID,
+		Quantity:    v.Quantity,
+		UnitPrice:   v.UnitPrice,
+		PaidAmount:  v.PaidAmount,
+		Status:      v.Status,
+		DeliveryURL: v.DeliveryURL,
+		Content:     v.Content,
+		Cards:       v.Cards,
+		Instruction: v.Instruction,
+	}
+	// 下单后的余额，方便前端即时刷新
+	var buyer models.Buyer
+	if err := s.db.WithContext(ctx).First(&buyer, po.BuyerID).Error; err == nil {
+		out.Order.BalanceAfter = buyer.Balance
+	}
+	out.Message = "支付成功，已自动发货"
+	return out
 }
 
 // ---------------------------------------------------------------- 查询
@@ -618,12 +941,25 @@ func (s *PaymentService) resolveNotifyURL(p PaymentSettings) string {
 	return base + "/api/shop/payment/notify"
 }
 
-func (s *PaymentService) resolveReturnURL(p PaymentSettings) string {
+func (s *PaymentService) resolveReturnURL(p PaymentSettings, purpose, tradeNo string) string {
 	if u := strings.TrimSpace(p.ReturnURL); u != "" {
 		return u
 	}
 	base := strings.TrimRight(s.cfg.App.BaseURL, "/")
-	return base + "/shop/wallet"
+
+	// 直付购卡：买家花钱是为了拿卡密，必须把他送到「订单详情」，
+	// 而不是钱包页 —— 落在钱包页会让人以为自己没买到东西。
+	//
+	// 这里用 trade_no 而不是 order_id：支付回调到达时自动发货可能还没跑完
+	// （甚至可能因为上游抖动而失败），此时 payment_orders.order_id 还是 NULL。
+	// 过渡页拿着 trade_no 轮询 /api/shop/payment/status，
+	// 拿到订单 ID 后再跳到 /orders/{id}。
+	if purpose == models.PaymentPurposeOrder && tradeNo != "" {
+		return base + "/orders/pay/" + tradeNo
+	}
+
+	// 充值：本来就是要充余额，回钱包页看到余额入账才是对的。
+	return base + "/wallet"
 }
 
 // generatePayTradeNo 生成商户订单号。

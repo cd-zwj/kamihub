@@ -114,7 +114,17 @@ export default function ShopOrderDetail() {
             type="warning"
             showIcon
             message="该订单发货失败"
-            description="购买金额已自动退回您的余额。如有疑问请凭订单号联系客服。"
+            description="购买金额已自动退回您的余额，无需申请。多数情况是商品临时缺货，换一个同类商品或稍后重试即可。"
+            action={
+              <Space direction="vertical" size={4}>
+                <Button size="small" onClick={() => navigate('/help')}>
+                  怎么办？
+                </Button>
+                <Button size="small" type="primary" onClick={() => navigate('/')}>
+                  换商品
+                </Button>
+              </Space>
+            }
           />
         )}
 

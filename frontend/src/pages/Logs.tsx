@@ -4,6 +4,7 @@ import { ReloadOutlined } from '@ant-design/icons';
 import { api, toastError } from '@/api/client';
 import type { AuditLog, CallLog, Platform } from '@/api/types';
 import { fmtTime } from '@/utils/format';
+import { PageHeader } from '@/admin/ui';
 
 const ACTION_TEXT: Record<string, string> = {
   'auth.login': '登录成功',
@@ -93,14 +94,7 @@ export default function Logs() {
 
   return (
     <>
-      <div className="page-head">
-        <div>
-          <h2 className="page-title">日志</h2>
-          <p className="page-desc">
-            上游调用日志里的请求与响应已自动脱敏，卡密与密钥不会落库。
-          </p>
-        </div>
-      </div>
+      <PageHeader title="日志" desc="上游调用日志里的请求与响应已自动脱敏，卡密与密钥不会落库" />
 
       <Card size="small">
         <Tabs

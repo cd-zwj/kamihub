@@ -8,6 +8,7 @@ import { api, toastError } from '@/api/client';
 import { DELIVERY_MODE_TEXT, STRATEGY_HINT, strategyText, type Goods, type Platform, type StrategyMeta } from '@/api/types';
 import { money, yuan } from '@/utils/format';
 import { useAuth } from '@/auth/AuthContext';
+import { PageHeader } from '@/admin/ui';
 
 /** 上游商品（各平台返回的结构统一后） */
 interface UpstreamGoods {
@@ -227,11 +228,15 @@ export default function UpstreamGoodsPage() {
 
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
+      <PageHeader
+        title="上游商品"
+        desc="浏览各平台的商品目录，选中后归类到你自己的商品里作为一条货源"
+      />
       <Card
-        title="上游商品目录"
+        variant="borderless"
         extra={
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            浏览各平台的商品，选中后归类到你自己的商品里
+            选择平台后点击「查询」
           </Typography.Text>
         }
       >

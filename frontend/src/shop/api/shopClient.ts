@@ -102,6 +102,27 @@ export interface ShopListing {
   /** -1 表示上游代发、库存需实时询价 */
   stock: number;
   stock_mode: number;
+  /** 阶梯折扣档位（按 min_qty 升序），后端已算好各档单价 */
+  tiers?: ShopListingTier[];
+}
+
+/** 阶梯折扣档位 */
+export interface ShopListingTier {
+  min_qty: number;
+  /** 折扣百分比：90 表示 9 折 */
+  discount: number;
+  /** 该档折后单价（后端算好，前端直接用，避免重复计算口径不一致） */
+  unit_price: string;
+  label?: string;
+}
+
+/** 实时报价结果 */
+export interface ShopListingQuote {
+  listing_id: number;
+  quantity: number;
+  unit_price: string;
+  total: string;
+  tiers?: Array<{ min_qty: number; discount: number; unit_price: string }>;
 }
 
 export interface ShopWalletSummary {
@@ -174,7 +195,14 @@ export interface ShopCreatePaymentResult {
   /** 二维码内容（use_api 模式） */
   qrcode?: string;
   expires_at: string;
+  /**
+   * 实际应付金额。
+   * 直付购卡时这是**服务端按商品售价算出来的权威金额**，
+   * 展示「应付金额」要用它，不要用前端自己算的值。
+   */
   amount: string;
+  /** recharge=钱包充值 / order=直付购卡 */
+  purpose?: 'recharge' | 'order' | string;
 }
 
 export interface ShopPaymentOrder {
@@ -190,11 +218,204 @@ export interface ShopPaymentOrder {
   paid_at?: string | null;
   expires_at: string;
   created_at: string;
+  /** recharge / order */
+  purpose?: string;
+  /** 直付购卡成功后关联的订单 ID */
+  order_id?: number | null;
+}
+
+/**
+ * 付款成功后自动发货的结果。
+ *
+ * 只有「直付购卡」的支付单才会返回它；普通充值返回 null。
+ * 发货失败时 ok=false 且 message 里带着兜底文案 ——
+ * 钱已经进了余额，页面必须把这句话显示出来。
+ */
+export interface ShopPurchaseDispatch {
+  attempted: boolean;
+  ok: boolean;
+  message?: string;
+  order?: ShopPurchaseResult | null;
+}
+
+/** 直付购卡的下单意图：付款成功后自动按它下单发货 */
+export interface ShopCreatePaymentIntent {
+  listing_id: number;
+  quantity: number;
+  /** 幂等键，前端生成；重复回调/重复查单不会重复下单 */
+  request_id: string;
+}
+
+/**
+ * 开放接口凭证（下游 / 代理用）。
+ *
+ * 注意：列表接口不会返回 secret，需要单独调 reveal / create / reset 才能拿到。
+ * secret 是签名密钥，只在本地参与 HMAC 计算，不会随请求发送。
+ */
+export interface ShopApiKey {
+  id: number;
+  buyer_id: number;
+  name: string;
+  app_id: string;
+  /** 1 启用 / 0 停用 */
+  status: number;
+  call_count: number;
+  last_used_at?: string | null;
+  last_used_ip: string;
+  created_at: string;
+  updated_at: string;
+}
+
+// ---------------------------------------------------------------- 站点信息
+
+/** 一条客服联系方式（后台 settings.contact 里配的，已过滤掉未启用的） */
+export interface ShopContactItem {
+  type: string;
+  label: string;
+  value: string;
+}
+
+export interface ShopSiteInfo {
+  site_name: string;
+  logo_url: string;
+  footer_note: string;
+  contact: {
+    items: ShopContactItem[];
+    notice: string;
+    work_hours: string;
+  };
+  delivery: {
+    /** 提货链接有效期（小时），帮助页据此写「链接多久过期」 */
+    link_ttl_hours: number;
+    /** 链接失效时页面上的提示原文 */
+    expired_hint: string;
+  };
+  payment: {
+    enabled: boolean;
+    pay_types: string[] | null;
+    /** 支付单有效期（分钟），超时未付自动关闭 */
+    order_ttl_minutes: number;
+  };
 }
 
 // ---------------------------------------------------------------- 接口
 
+// ---------------------------------------------------------------- 工单（售后）
+
+/** 工单分类 */
+export type TicketCategory =
+  | 'undelivered'
+  | 'invalid_card'
+  | 'link_expired'
+  | 'refund'
+  | 'other';
+
+/** 工单状态 */
+export type TicketStatus = 'pending' | 'processing' | 'resolved' | 'closed';
+
+/** 工单列表项 */
+export interface ShopTicket {
+  id: number;
+  ticket_no: string;
+  buyer_id: number;
+  order_id?: number | null;
+  category: TicketCategory;
+  priority: number;
+  subject: string;
+  status: TicketStatus;
+  context_snapshot?: string;
+  buyer_unread: number;
+  admin_unread: number;
+  last_reply_at?: string | null;
+  last_reply_by?: string;
+  created_at: string;
+  /** 运营视角才有 */
+  buyer_name?: string;
+  order_no?: string;
+}
+
+/** 工单里的一条消息 */
+export interface ShopTicketMessage {
+  id: number;
+  ticket_id: number;
+  sender_type: 'buyer' | 'admin' | 'system';
+  sender_id?: number | null;
+  sender_name?: string;
+  content: string;
+  /** JSON 字符串数组 */
+  images?: string;
+  created_at: string;
+}
+
+/** 工单详情 */
+export interface ShopTicketDetail {
+  ticket: ShopTicket;
+  messages: ShopTicketMessage[];
+  buyer_name?: string;
+  order_no?: string;
+}
+
+/** 提单时带的订单上下文快照（后端生成，前端只负责展示） */
+export interface TicketContextSnapshot {
+  order_no?: string;
+  goods_name?: string;
+  quantity?: number;
+  paid_amount?: string;
+  order_status?: string;
+  status_text?: string;
+  order_time?: string;
+  delivered_at?: string;
+  error_msg?: string;
+  card_count?: number;
+  delivery_state?: string;
+  delivery_expire?: string;
+  view_count?: number;
+}
+
 export const shopApi = {
+  // ---------- 站点信息 ----------
+  /**
+   * 站点信息（品牌 + 客服联系方式 + 提货规则）。
+   * 公开接口，未登录也能调；加载失败不应该阻塞页面，调用方要兜底。
+   */
+  siteInfo: () => unwrap<ShopSiteInfo>(http.get('/site')),
+
+  // ---------- 匿名购买 / 匿名查单 ----------
+  //
+  // 不注册账号也能买：下单时用「邮箱 + 自设的 6 位安全密码」，
+  // 之后凭同样的邮箱 + 密码查自己的订单与提货链接。
+  //
+  // 注意：这组接口全部用 POST + JSON body。6 位密码绝不能放在 URL 里，
+  // 否则会同时出现在 nginx 访问日志、浏览器历史和 Referer 中。
+  guest: {
+    /** 匿名下单：返回支付单，付款成功后自动发货 */
+    purchase: (body: {
+      email: string;
+      pin: string;
+      listing_id: number;
+      quantity: number;
+      request_id: string;
+      pay_type?: string;
+      use_api?: boolean;
+    }) => unwrap<{ pay: ShopCreatePaymentResult; email: string }>(http.post('/guest/purchase', body)),
+
+    /** 匿名查支付/发货结果（付款后轮询） */
+    paymentStatus: (body: { email: string; pin: string; trade_no: string }) =>
+      unwrap<{ payment: ShopPaymentOrder; purchase?: ShopPurchaseDispatch | null; warning?: string }>(
+        http.post('/guest/payment/status', body),
+      ),
+
+    /** 匿名查订单列表 */
+    orders: (body: { email: string; pin: string; page?: number; page_size?: number; status?: string }) =>
+      unwrap<PageResult<ShopOrderView> & { email: string; is_guest: boolean }>(
+        http.post('/guest/orders', body),
+      ),
+
+    /** 匿名查单个订单详情（含提货链接） */
+    order: (body: { email: string; pin: string; order_id: number }) =>
+      unwrap<ShopOrderView>(http.post('/guest/order', body)),
+  },
+
   // ---------- 认证 ----------
   register: (body: { username: string; email?: string; password: string }) =>
     unwrap<{ token: string; expires_at: string; buyer: ShopBuyer }>(
@@ -227,19 +448,88 @@ export const shopApi = {
   orders: (q: { page?: number; page_size?: number; status?: string } = {}) =>
     unwrap<PageResult<ShopOrderView>>(http.get('/orders', { params: q })),
   order: (id: number) => unwrap<ShopOrderView>(http.get(`/orders/${id}`)),
+  /** 实时报价：改数量时调用，返回折后单价/合计/命中档位 */
+  quoteListing: (id: number, quantity: number) =>
+    unwrap<ShopListingQuote>(http.get(`/listings/${id}/quote`, { params: { quantity } })),
 
   // ---------- 在线支付（易支付）----------
   /** 支付可用性：决定钱包页是否展示「在线充值」 */
   paymentInfo: () => unwrap<ShopPaymentInfo>(http.get('/payment/info')),
-  createPayment: (body: { amount: number; pay_type?: string; use_api?: boolean }) =>
-    unwrap<ShopCreatePaymentResult>(http.post('/payment/create', body)),
-  /** 查询支付状态：内部会主动向上游查单并补入账 */
+  /**
+   * 创建在线支付单。
+   *
+   * 两种用法：
+   *  1. 钱包充值：只传 amount / pay_type / use_api（历史行为，完全不变）
+   *  2. 直付购卡：额外传 purpose:'order' + intent，
+   *     金额由服务端按商品售价权威计算，付款成功后自动下单发货
+   */
+  createPayment: (body: {
+    amount: number;
+    pay_type?: string;
+    use_api?: boolean;
+    purpose?: 'recharge' | 'order';
+    listing_id?: number;
+    quantity?: number;
+    request_id?: string;
+  }) => unwrap<ShopCreatePaymentResult>(http.post('/payment/create', body)),
+  /**
+   * 查询支付状态：内部会主动向上游查单并补入账。
+   * 直付购卡时 purchase 字段带回自动发货结果（含卡密/提货链接，
+   * 或「发货失败、钱在余额」的兜底文案）。
+   */
   paymentStatus: (tradeNo: string) =>
-    unwrap<{ payment: ShopPaymentOrder; warning?: string }>(
-      http.get(`/payment/status/${encodeURIComponent(tradeNo)}`),
-    ),
+    unwrap<{
+      payment: ShopPaymentOrder;
+      warning?: string;
+      purchase?: ShopPurchaseDispatch | null;
+    }>(http.get(`/payment/status/${encodeURIComponent(tradeNo)}`)),
   payments: (q: { page?: number; page_size?: number } = {}) =>
     unwrap<PageResult<ShopPaymentOrder>>(http.get('/payments', { params: q })),
+
+  // ---------- 开放接口凭证（下游 / 代理）----------
+  /** 我的密钥列表（不含 secret 明文） */
+  apiKeys: () => unwrap<{ list: ShopApiKey[]; max: number }>(http.get('/api-keys')),
+  /** 新建密钥：这是唯一一次「创建即返回明文」的时机 */
+  createApiKey: (name: string) =>
+    unwrap<{ key: ShopApiKey; secret: string }>(http.post('/api-keys', { name })),
+  /** 查看明文 secret（加密存储，可随时回看） */
+  revealApiKey: (id: number) =>
+    unwrap<{ secret: string }>(http.post(`/api-keys/${id}/reveal`)),
+  /** 重置 secret：app_id 保持不变，只换密钥 */
+  resetApiKey: (id: number) =>
+    unwrap<{ secret: string }>(http.post(`/api-keys/${id}/reset`)),
+  /** 启用(1) / 停用(0) */
+  setApiKeyStatus: (id: number, status: number) =>
+    unwrap<{ message: string }>(http.post(`/api-keys/${id}/status`, { status })),
+  renameApiKey: (id: number, name: string) =>
+    unwrap<{ message: string }>(http.post(`/api-keys/${id}/rename`, { name })),
+  deleteApiKey: (id: number) =>
+    unwrap<{ message: string }>(http.delete(`/api-keys/${id}`)),
+
+  // ---------- 工单（售后咨询）----------
+  tickets: {
+    /** 提交工单：带上 order_id 会自动携带订单上下文，运营不用来回问 */
+    create: (body: {
+      category: TicketCategory;
+      subject: string;
+      content: string;
+      order_id?: number;
+      images?: string[];
+    }) =>
+      unwrap<{ id: number; ticket_no: string; status: string }>(
+        http.post('/tickets', body),
+      ),
+    /** 我的工单列表 */
+    list: (q: { page?: number; page_size?: number; status?: string; category?: string } = {}) =>
+      unwrap<PageResult<ShopTicket>>(http.get('/tickets', { params: q })),
+    /** 工单详情（进入即已读） */
+    get: (id: number) => unwrap<ShopTicketDetail>(http.get(`/tickets/${id}`)),
+    /** 追加消息 */
+    reply: (id: number, body: { content: string; images?: string[] }) =>
+      unwrap<{ ok: boolean }>(http.post(`/tickets/${id}/reply`, body)),
+    /** 未读工单数 */
+    unread: () => unwrap<{ unread: number }>(http.get('/tickets/unread')),
+  },
 };
 
 export default http;

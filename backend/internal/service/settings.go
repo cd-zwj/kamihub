@@ -10,6 +10,7 @@ import (
 	"gorm.io/gorm"
 
 	"kamihub/internal/models"
+	"kamihub/internal/pkg/epay"
 	"kamihub/internal/pkg/textfilter"
 )
 
@@ -135,6 +136,20 @@ type PaymentSettings struct {
 	// QueryPath 订单查询路径，默认 /api.php
 	QueryPath string `json:"query_path"`
 
+	// ---- 接入方式 ----
+	// Gateway 决定用哪一套协议跟上游说话。做成「可选」而不是直接改实现，
+	// 是为了不动已经在跑的标准易支付路径：
+	//
+	//	epay（默认，留空同义）—— 标准易支付：
+	//	    submit.php 返回一段自动提交的 HTML 表单；
+	//	    JSON 用 msg / trade_no / payurl / qrcode。
+	//	epay_redirect —— 302 跳转式（彩豆 521cd 等）：
+	//	    submit.php 直接 302，Location 就是收银台地址；
+	//	    JSON 用 message / data / redirect。
+	//
+	// 字段转换在 epay 包的 gateway.go 里，业务层与前端只认统一结构。
+	Gateway string `json:"gateway"`
+
 	// ---- 业务参数 ----
 	// SiteName 显示在支付页面上的站点名
 	SiteName string `json:"site_name"`
@@ -213,6 +228,15 @@ func (p *PaymentSettings) Normalize() {
 	p.APIURL = strings.TrimRight(strings.TrimSpace(p.APIURL), "/")
 	p.PID = strings.TrimSpace(p.PID)
 	p.Key = strings.TrimSpace(p.Key)
+
+	// 接入方式只接受两个已知取值，其余（含空串）一律当标准方式 ——
+	// 这样即使后台传了脏值或老配置里没这个字段，也不会走到未知分支。
+	switch strings.TrimSpace(p.Gateway) {
+	case epay.GatewayRedirect:
+		p.Gateway = epay.GatewayRedirect
+	default:
+		p.Gateway = epay.GatewayStandard
+	}
 }
 
 // IsUsable 判断配置是否完整到可以发起支付。

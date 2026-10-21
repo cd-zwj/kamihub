@@ -35,8 +35,11 @@ func filterInstruction(text string, rules []textfilter.Rule) string {
 //   - 卡密只在服务端渲染进 HTML，不经过任何前端 API
 //   - 失效后仍展示联系方式，避免买家以为被骗
 func (h *Handlers) deliveryPage(c *gin.Context) {
-	token := strings.TrimSpace(c.Param("token"))
-	if token == "" || len(token) > 128 {
+	// 先归一化：买家常把「链接 + 使用说明」整段复制或截图识别，后面的中文、
+	// 换行、标点会被浏览器一起带进路径。token 定长 43 位，截掉即可；
+	// 抄漏几位的情况保留原样，交给 FindByToken 的近似匹配去救。
+	token := service.NormalizeDeliveryToken(c.Param("token"))
+	if token == "" || len(token) > service.DeliveryTokenLen {
 		h.renderDeliveryError(c, "链接无效", "该提货链接格式不正确，请确认链接是否完整。")
 		return
 	}
@@ -56,10 +59,10 @@ func (h *Handlers) deliveryPage(c *gin.Context) {
 	// 需要密码且尚未解锁
 	if d.PasswordHash != "" && !h.isUnlocked(c, token) {
 		h.renderPage(c, render.PageData{
-			SiteName:   h.settings.Brand(ctx).SiteName,
-			LogoURL:    h.settings.Brand(ctx).LogoURL,
-			NeedUnlock: true,
-			OrderNo:    order.OrderNo,
+			SiteName:    h.settings.Brand(ctx).SiteName,
+			LogoURL:     h.settings.Brand(ctx).LogoURL,
+			NeedUnlock:  true,
+			OrderNo:     order.OrderNo,
 			ShowOrderNo: true,
 		})
 		return
@@ -77,8 +80,8 @@ func (h *Handlers) deliveryPage(c *gin.Context) {
 
 // deliveryUnlock 处理提货页密码提交。
 func (h *Handlers) deliveryUnlock(c *gin.Context) {
-	token := strings.TrimSpace(c.Param("token"))
-	if token == "" {
+	token := service.NormalizeDeliveryToken(c.Param("token"))
+	if token == "" || len(token) > service.DeliveryTokenLen {
 		h.renderDeliveryError(c, "链接无效", "该提货链接格式不正确。")
 		return
 	}
@@ -141,12 +144,12 @@ func (h *Handlers) renderDeliveryOK(c *gin.Context, d *models.Delivery, order *m
 		ShowNotice:      page.ShowNotice,
 		AllowCopy:       page.AllowCopy,
 
-		OrderNo: order.OrderNo,
-		TradeNo: order.PlatformTradeNo,
+		OrderNo:  order.OrderNo,
+		TradeNo:  order.PlatformTradeNo,
 		Quantity: order.Quantity,
 
-		Cards:     cardList(*order),
-		Content:   order.Content,
+		Cards:   cardList(*order),
+		Content: order.Content,
 		// 使用说明会原样展示给买家，上游供货商往往在里面写了自己的联系方式。
 		// 这里在「渲染时」过滤，不改数据库里的 order.Instruction ——
 		// 存档保留原文便于追溯对账，买家看到的是净化后的版本。

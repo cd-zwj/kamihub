@@ -25,15 +25,16 @@ import {
 } from 'antd';
 import {
   CopyOutlined,
+  ExportOutlined,
   PlusOutlined,
   ReloadOutlined,
-  WalletOutlined,
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import adminShopApi from '@/api/adminShop';
 import type {
   AdminBuyer,
   AdminListing,
+  AdminListingTierInput,
   AdminRechargeCode,
   AdminShopOrder,
   AdminWalletTx,
@@ -43,8 +44,9 @@ import { api } from '@/api/client';
 import { toastError } from '@/api/client';
 import type { Goods } from '@/api/types';
 import ImageUploader from '@/components/ImageUploader';
+import { MetricBar, PageHeader, StatusTag, toneOf } from '@/admin/ui';
 
-const { Text, Title } = Typography;
+const { Text } = Typography;
 
 function money(v: string | number | undefined | null): string {
   const n = Number(v ?? 0);
@@ -58,14 +60,21 @@ const TX_TYPE: Record<string, string> = {
   admin_adjust: '人工调整',
 };
 
-const ORDER_STATUS_COLOR: Record<string, string> = {
-  delivered: 'green',
-  purchasing: 'blue',
-  pending: 'blue',
-  failed: 'red',
-  cancelled: 'default',
-  refunded: 'orange',
-  closed: 'default',
+/**
+ * C 端订单状态中文名。
+ *
+ * 改版前这里直接把后端返回的英文 status 渲染进 Tag（`<Tag>{v}</Tag>`），
+ * 买家侧订单页看到的就是 delivered / purchasing 这种英文，
+ * 和后台其他页面（已发货 / 采购中）不一致。
+ */
+const SHOP_ORDER_STATUS_TEXT: Record<string, string> = {
+  delivered: '已发货',
+  purchasing: '发货中',
+  pending: '待处理',
+  failed: '失败',
+  cancelled: '已取消',
+  refunded: '已退款',
+  closed: '已关闭',
 };
 
 const RECHARGE_STATUS: Record<number, { text: string; color: string }> = {
@@ -99,66 +108,62 @@ function OverviewTab() {
 
   return (
     <div>
-      <div style={{ marginBottom: 12 }}>
+      <div className="table-toolbar" style={{ justifyContent: 'flex-end' }}>
         <Button icon={<ReloadOutlined />} onClick={load} loading={loading}>
           刷新
         </Button>
       </div>
-      <Row gutter={[16, 16]}>
-        <Col xs={12} lg={6}>
-          <Card loading={loading}>
-            <Statistic title="买家总数" value={stats?.buyer_total ?? 0} suffix={`/ 启用 ${stats?.buyer_enabled ?? 0}`} />
-          </Card>
-        </Col>
-        <Col xs={12} lg={6}>
-          <Card loading={loading}>
-            <Statistic title="在售商品" value={stats?.listing_on ?? 0} suffix={`/ 共 ${stats?.listing_total ?? 0}`} />
-          </Card>
-        </Col>
-        <Col xs={12} lg={6}>
-          <Card loading={loading}>
-            <Statistic title="C 端订单" value={stats?.order_total ?? 0} suffix={`/ 成功 ${stats?.order_delivered ?? 0}`} />
-          </Card>
-        </Col>
-        <Col xs={12} lg={6}>
-          <Card loading={loading}>
-            <Statistic
-              title="累计成交额"
-              value={money(stats?.revenue)}
-              prefix="¥"
-              valueStyle={{ color: '#52c41a' }}
-            />
-          </Card>
-        </Col>
-      </Row>
 
-      <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
-        <Col xs={24} lg={12}>
-          <Card loading={loading}>
-            <Statistic
-              title="买家余额总额（平台负债）"
-              value={money(stats?.balance_liability)}
-              prefix="¥"
-              valueStyle={{ color: '#faad14' }}
-            />
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              这是买家已充值但尚未消费的金额，属于平台待履约负债
-            </Text>
-          </Card>
-        </Col>
-        <Col xs={24} lg={12}>
-          <Card loading={loading}>
-            <Statistic
-              title="发货失败订单"
-              value={stats?.order_failed ?? 0}
-              valueStyle={{ color: (stats?.order_failed ?? 0) > 0 ? '#f5222d' : undefined }}
-            />
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              失败的订单会自动退款给买家，此处用于监控上游稳定性
-            </Text>
-          </Card>
-        </Col>
-      </Row>
+      {/* 6 个指标合成一条，而不是 4 张卡 + 2 张卡（设计文档 §4.6） */}
+      <MetricBar
+        items={[
+          {
+            label: '买家总数',
+            value: stats?.buyer_total ?? 0,
+            hint: `启用 ${stats?.buyer_enabled ?? 0} 个`,
+            tone: (stats?.buyer_enabled ?? 0) < (stats?.buyer_total ?? 0) ? 'warning' : undefined,
+          },
+          {
+            label: '在售商品',
+            value: stats?.listing_on ?? 0,
+            hint: `共 ${stats?.listing_total ?? 0} 个商品`,
+            tone: (stats?.listing_on ?? 0) === 0 ? 'danger' : undefined,
+          },
+          {
+            label: 'C 端订单',
+            value: stats?.order_total ?? 0,
+            hint: `成功 ${stats?.order_delivered ?? 0} 单`,
+          },
+          {
+            label: '累计成交额',
+            value: `¥${money(stats?.revenue)}`,
+            hint: '已成功发货的订单金额',
+            tone: 'success',
+          },
+          {
+            label: '买家余额总额',
+            value: `¥${money(stats?.balance_liability)}`,
+            hint: '已充值未消费',
+            tone: Number(stats?.balance_liability ?? 0) > 0 ? 'warning' : undefined,
+          },
+          {
+            label: '发货失败订单',
+            value: stats?.order_failed ?? 0,
+            hint: Number(stats?.order_failed ?? 0) > 0 ? '失败会自动退款给买家，请排查库存' : '暂无失败订单',
+            tone: Number(stats?.order_failed ?? 0) > 0 ? 'danger' : 'success',
+          },
+        ]}
+      />
+
+      {Number(stats?.order_failed ?? 0) > 0 && (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginTop: 16 }}
+          message="有发货失败的 C 端订单"
+          description="这些订单已自动退款到买家余额。请到「商品上架」检查对应商品的库存状态，避免买家继续下单后再次失败。"
+        />
+      )}
     </div>
   );
 }
@@ -365,7 +370,9 @@ function BuyersTab() {
               </Row>
             )}
 
-            <Title level={5}>余额流水</Title>
+            <h3 className="a-section-title" style={{ marginBottom: 10 }}>
+              余额流水
+            </h3>
             <Table
               rowKey="id"
               size="small"
@@ -455,6 +462,12 @@ function ListingsTab() {
   const [editing, setEditing] = useState<AdminListing | null>(null);
   const [form] = Form.useForm<ListingFormValues>();
 
+  // ---- 阶梯折扣（只对已存在的 listing 生效：新建时还没有 id 没法挂档位）----
+  const [tiers, setTiers] = useState<AdminListingTierInput[]>([]);
+  const [tiersLoading, setTiersLoading] = useState(false);
+  /** 已配档位的 listing id 集合：用于在表格里显示「几档折扣」 */
+  const [tierCounts, setTierCounts] = useState<Record<number, number>>({});
+
   const load = useCallback(async (p = 1) => {
     setLoading(true);
     try {
@@ -462,6 +475,22 @@ function ListingsTab() {
       setRows(res.list ?? []);
       setTotal(res.total ?? 0);
       setPage(p);
+
+      // 顺带取每个商品的档位数，用于表格「折扣」列。
+      // 商品数不多（每页 10 个），并发拉取可接受；失败不影响主列表展示。
+      const list = res.list ?? [];
+      const counts: Record<number, number> = {};
+      await Promise.all(
+        list.map(async (r) => {
+          try {
+            const t = await adminShopApi.listTiers(r.id);
+            counts[r.id] = (t.tiers ?? []).filter((x) => x.enabled).length;
+          } catch {
+            counts[r.id] = 0;
+          }
+        }),
+      );
+      setTierCounts(counts);
     } catch (e) {
       toastError(e);
     } finally {
@@ -480,6 +509,7 @@ function ListingsTab() {
 
   const openCreate = () => {
     setEditing(null);
+    setTiers([]);
     form.resetFields();
     form.setFieldsValue({ min_qty: 1, sort_order: 0, is_listed: false });
     setEditOpen(true);
@@ -502,17 +532,82 @@ function ListingsTab() {
       is_listed: r.is_listed,
     });
     setEditOpen(true);
+
+    // 拉取该商品已有的阶梯折扣
+    setTiersLoading(true);
+    adminShopApi
+      .listTiers(r.id)
+      .then((res) =>
+        setTiers(
+          (res.tiers ?? []).map((t) => ({
+            min_qty: t.min_qty,
+            discount: t.discount,
+            label: t.label ?? '',
+            enabled: t.enabled,
+          })),
+        ),
+      )
+      .catch(() => setTiers([]))
+      .finally(() => setTiersLoading(false));
+  };
+
+  /** 校验阶梯折扣：与后端规则保持一致，错了就地提示 */
+  const validateTiers = (list: AdminListingTierInput[]): string | null => {
+    const seen = new Set<number>();
+    for (let i = 0; i < list.length; i++) {
+      const t = list[i];
+      if (!t.min_qty || t.min_qty < 2) {
+        return `第 ${i + 1} 档：满几件起至少填 2（1 件就是原价，不用配档位）`;
+      }
+      if (seen.has(t.min_qty)) {
+        return `满 ${t.min_qty} 件配置了两次，请去掉重复档位`;
+      }
+      seen.add(t.min_qty);
+      if (!t.discount || t.discount < 1 || t.discount > 99) {
+        return `第 ${i + 1} 档：折扣需在 1~99 之间（90 表示 9 折）`;
+      }
+    }
+    return null;
   };
 
   const submit = async (values: ListingFormValues) => {
+    const err = validateTiers(tiers);
+    if (err) {
+      message.error(err);
+      return;
+    }
     try {
+      let listingId: number;
       if (editing) {
         await adminShopApi.updateListing(editing.id, values);
+        listingId = editing.id;
         message.success('已更新');
       } else {
-        await adminShopApi.createListing(values);
+        const created = await adminShopApi.createListing(values);
+        listingId = created.id;
         message.success('已创建');
       }
+
+      // 商品保存成功后再整体替换档位（新建时也能配上）
+      if (listingId) {
+        try {
+          await adminShopApi.saveTiers(
+            listingId,
+            tiers.map((t) => ({
+              min_qty: t.min_qty,
+              discount: t.discount,
+              label: t.label ?? '',
+              enabled: t.enabled,
+            })),
+          );
+        } catch (te) {
+          // 商品已保存成功，档位失败要明确告知，避免运营以为都存上了
+          message.warning(
+            `商品已保存，但阶梯折扣保存失败：${te instanceof Error ? te.message : '未知错误'}`,
+          );
+        }
+      }
+
       setEditOpen(false);
       await load(editing ? page : 1);
     } catch (e) {
@@ -554,6 +649,20 @@ function ListingsTab() {
       title: '限购',
       width: 100,
       render: (_, r) => `${r.min_qty} ~ ${r.max_qty > 0 ? r.max_qty : '不限'}`,
+    },
+    {
+      // 阶梯折扣：让运营一眼看出哪些商品配了批量优惠
+      title: '折扣',
+      width: 90,
+      render: (_, r) => {
+        const n = tierCounts[r.id] ?? 0;
+        if (n === 0) return <Text type="secondary">-</Text>;
+        return (
+          <Tooltip title={`已配置 ${n} 档阶梯折扣，点「编辑」可修改`}>
+            <Tag color="orange">{n} 档</Tag>
+          </Tooltip>
+        );
+      },
     },
     { title: '已售', dataIndex: 'sold_count', width: 80 },
     {
@@ -748,6 +857,112 @@ function ListingsTab() {
 
           <Form.Item name="description" label="商品详情">
             <Input.TextArea rows={4} placeholder="支持换行" />
+          </Form.Item>
+
+          {/* ---------------- 阶梯折扣 ----------------
+              运营配「买满 N 件打 M 折」，命中后整单按折后单价结算。
+              后端在「报价/余额支付/支付宝直付」三处共用同一个算价点，
+              不会出现前端显示折扣、实际扣原价的情况。 */}
+          <Form.Item label="阶梯折扣（批量优惠）" style={{ marginBottom: 8 }}>
+            <Alert
+              type="info"
+              showIcon
+              style={{ marginBottom: 8 }}
+              message="买得越多单价越低，命中档位后整单按折后价结算"
+              description="折扣填 90 表示 9 折、85 表示 8.5 折。满件数至少填 2。不配则按原价。买家在商品页会看到档位提示与「再买 N 件降价」引导。"
+            />
+            {tiersLoading ? (
+              <Text type="secondary">加载中…</Text>
+            ) : tiers.length === 0 ? (
+              <Text type="secondary" style={{ fontSize: 13 }}>
+                暂无档位
+              </Text>
+            ) : (
+              <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                {tiers.map((t, idx) => (
+                  <Row gutter={8} key={idx} align="middle">
+                    <Col span={7}>
+                      <InputNumber
+                        style={{ width: '100%' }}
+                        min={2}
+                        value={t.min_qty}
+                        addonBefore="满"
+                        addonAfter="件"
+                        onChange={(v) => {
+                          const next = [...tiers];
+                          next[idx] = { ...next[idx], min_qty: Number(v) || 2 };
+                          setTiers(next);
+                        }}
+                      />
+                    </Col>
+                    <Col span={7}>
+                      <InputNumber
+                        style={{ width: '100%' }}
+                        min={1}
+                        max={99}
+                        value={t.discount}
+                        addonAfter="折(百分比)"
+                        onChange={(v) => {
+                          const next = [...tiers];
+                          next[idx] = { ...next[idx], discount: Number(v) || 100 };
+                          setTiers(next);
+                        }}
+                      />
+                    </Col>
+                    <Col span={7}>
+                      <Input
+                        placeholder="备注（可选）"
+                        value={t.label}
+                        maxLength={20}
+                        onChange={(e) => {
+                          const next = [...tiers];
+                          next[idx] = { ...next[idx], label: e.target.value };
+                          setTiers(next);
+                        }}
+                      />
+                    </Col>
+                    <Col span={3}>
+                      <Space size={2}>
+                        <Switch
+                          checked={t.enabled}
+                          size="small"
+                          onChange={(v) => {
+                            const next = [...tiers];
+                            next[idx] = { ...next[idx], enabled: v };
+                            setTiers(next);
+                          }}
+                        />
+                        <Button
+                          size="small"
+                          danger
+                          type="text"
+                          onClick={() => setTiers(tiers.filter((_, i) => i !== idx))}
+                        >
+                          删除
+                        </Button>
+                      </Space>
+                    </Col>
+                  </Row>
+                ))}
+              </Space>
+            )}
+            <Button
+              size="small"
+              icon={<PlusOutlined />}
+              style={{ marginTop: 8 }}
+              onClick={() => {
+                // 默认给个合理的下一档：比现有最大档再高一档
+                const maxQty = tiers.reduce((m, t) => Math.max(m, t.min_qty), 1);
+                const nextMin = maxQty >= 2 ? maxQty * 2 : 5;
+                const nextDiscount = Math.max(50, 95 - tiers.length * 5);
+                setTiers([
+                  ...tiers,
+                  { min_qty: nextMin, discount: nextDiscount, label: '', enabled: true },
+                ]);
+              }}
+            >
+              添加档位
+            </Button>
           </Form.Item>
 
           <Form.Item name="is_listed" label="立即上架" valuePropName="checked">
@@ -1011,7 +1226,11 @@ function ShopOrdersTab() {
       title: '状态',
       dataIndex: 'status',
       width: 100,
-      render: (v: string) => <Tag color={ORDER_STATUS_COLOR[v] || 'default'}>{v}</Tag>,
+      render: (v: string) => (
+        <StatusTag tone={toneOf(v)} dot>
+          {SHOP_ORDER_STATUS_TEXT[v] || v}
+        </StatusTag>
+      ),
     },
     {
       title: '下单时间',
@@ -1061,16 +1280,17 @@ function ShopOrdersTab() {
 export default function ShopAdmin() {
   return (
     <div>
-      <div style={{ marginBottom: 16 }}>
-        <Title level={4} style={{ marginBottom: 4 }}>
-          <WalletOutlined /> C 端商城运营
-        </Title>
-        <Text type="secondary">
-          管理买家账号、上架商品、充值码与自助订单。买家站点入口：<Text code>/</Text>
-        </Text>
-      </div>
+      <PageHeader
+        title="C 端商城运营"
+        desc="管理买家账号、上架商品、充值码与自助订单"
+        extra={
+          <Button icon={<ExportOutlined />} href="/" target="_blank" rel="noreferrer">
+            打开买家商城
+          </Button>
+        }
+      />
 
-      <Card>
+      <Card variant="borderless">
         <Tabs
           items={[
             { key: 'overview', label: '运营概览', children: <OverviewTab /> },

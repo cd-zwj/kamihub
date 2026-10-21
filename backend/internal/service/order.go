@@ -87,7 +87,12 @@ func (s *OrderService) Create(ctx context.Context, in CreateOrderInput) (*models
 	}
 
 	// ---- 幂等：命中直接返回，绝不下第二单 ----
-	if existing, err := s.findByRequestID(ctx, in.RequestID); err == nil && existing != nil {
+	//
+	// 先到的那个请求可能还在采购中（订单行是 purchasing）。这时不立刻返回半成品：
+	// 调用方要的是「同一单的最终结果」，不是「同一单的中间态」。最多等
+	// idempotentWait 让它跑完；等不到就把当前状态返回，由调用方按 status 决定
+	// 是否继续轮询（GET /api/orders/:id）。
+	if existing, ok := s.replayExisting(ctx, in.RequestID, idempotentWait); ok {
 		slog.Info("命中幂等记录，直接回放", "request_id", in.RequestID, "order_no", existing.OrderNo)
 		return existing, nil
 	}
@@ -112,17 +117,20 @@ func (s *OrderService) Create(ctx context.Context, in CreateOrderInput) (*models
 		return nil, fmt.Errorf("数量超过该商品上限：最大 %d", goods.MaxQuantity)
 	}
 
-	// ---- 同商品串行，避免并发把同一个货源抢空 ----
-	release, ok := s.cache.Lock(ctx, fmt.Sprintf("lock:goods:%d", goods.ID), 3*time.Minute)
-	if !ok {
-		return nil, errors.New("该商品正在采购中，请稍后重试")
-	}
-	defer release()
-
-	// 拿到锁后再查一次幂等，覆盖并发重复提交
-	if existing, err := s.findByRequestID(ctx, in.RequestID); err == nil && existing != nil {
-		return existing, nil
-	}
+	// ---- 这里刻意不加「同商品互斥锁」----
+	//
+	// 原来有一把 lock:goods:<id>（3 分钟 TTL），拿不到就立刻返回 400
+	// 「该商品正在采购中，请稍后重试」。它带来两个问题：
+	//   1) 上游库存由上游自己原子裁决（create 是原子的，缺货会同步返回），
+	//      我们用自己的锁替上游管库存，等于让并发请求连「去问一次」的机会都没有；
+	//   2) 抢不到锁就 400，订单一行都不落库 —— 用户下单后什么都看不到。
+	//
+	// 现在并发直连上游：上游返回售罄/余额不足就走下面的循环换下一个货源。
+	// 真正需要保护的「同一个 request_id 重复扣款」由数据库唯一索引 + 先落库
+	// （见下方幂等闸门）保证，不依赖 Redis，也不依赖这把锁。
+	//
+	// 自有卡密（stock_mode=local）也不在这里加锁：它的库存确实是我们自己的，
+	// 但 createFromCardPool 用的是「先落库 + 原子取卡」，本来就不需要商品级锁。
 
 	// ---- 构建候选货源 ----
 	// 自建商品（stock_mode=local）没有上游货源，走本地卡密池发货。
@@ -156,14 +164,41 @@ func (s *OrderService) Create(ctx context.Context, in CreateOrderInput) (*models
 		order.GoodsSnapshot = snap
 	}
 
+	// ---- 幂等闸门：先把订单骨架落库，再去动上游的钱 ----
+	//
+	// 顺序至关重要。request_id 的唯一索引是幂等的权威保证，而它只在「行真的
+	// 写进去」那一刻才生效。以前这次插入在采购之后（上游已经扣过款），于是并发
+	// 或客户端超时重试会先各扣一次钱、再撞唯一索引回放 —— 钱花了，货只发一份。
+	//
+	// 现在先落一条 purchasing 骨架，好处是三件事一起解决：
+	//   - 撞唯一索引 → 另一个请求已经建好这单 → 等待并回放，绝不重复采购；
+	//   - 订单秒级可见，不再出现「用户下单后什么都看不到」；
+	//   - 进程若崩在采购中途，留下的是「有单、没花钱」，可由后台取消或重新查单，
+	//     而不是「钱花了、本地无记录」的孤儿单。
+	if err := s.db.WithContext(ctx).Create(order).Error; err != nil {
+		if isDuplicateKey(err) {
+			if existing, ok := s.replayExisting(ctx, in.RequestID, idempotentWait); ok {
+				slog.Info("命中幂等记录，直接回放", "request_id", in.RequestID, "order_no", existing.OrderNo)
+				return existing, nil
+			}
+		}
+		return nil, fmt.Errorf("保存订单失败: %w", err)
+	}
+
 	slog.Info("开始采购",
 		"order_no", order.OrderNo, "goods", goods.Code,
 		"quantity", quantity, "strategy", strategy.Name(), "candidates", len(ranked))
 
-	maxAttempts := goods.MaxAttempts
-	if maxAttempts <= 0 {
-		maxAttempts = 3
-	}
+	// 换货源的上限：默认穷尽所有候选货源。
+	//
+	// 需求口径是「只要还有下一个货源就换，不限平台」。原先取 goods.MaxAttempts
+	// （默认 3），会在还有货源的情况下提前刹车 —— 挂了 6 个货源却只试 3 个。
+	// 现在一律以候选数为准；只有 FailoverEnabled=false 才退化成「只试一家」。
+	//
+	// 因此 goods.MaxAttempts 不再参与截断（字段保留，不动数据库结构）。若以后
+	// 确实需要「显式限制上游调用次数」，应另加一个语义明确的新配置项，而不是
+	// 复用这个默认值为 3、语义含糊的老字段。
+	maxAttempts := len(ranked)
 	if !goods.FailoverEnabled {
 		maxAttempts = 1
 	}
@@ -306,13 +341,32 @@ func (s *OrderService) Create(ctx context.Context, in CreateOrderInput) (*models
 		order.ExtraText = s.renderExtra(ctx, &goods, order, purchased)
 	}
 
-	if err := s.db.WithContext(ctx).Create(order).Error; err != nil {
-		// request_id 唯一索引冲突：说明并发下已被另一个请求创建，回放那一条
-		if isDuplicateKey(err) {
-			if existing, ferr := s.findByRequestID(ctx, in.RequestID); ferr == nil && existing != nil {
-				return existing, nil
-			}
-		}
+	// 骨架在「幂等闸门」那一步就已经落库了，这里只能 UPDATE 回填，不能再 Create
+	// （再插一次会撞 request_id 唯一索引）。订单号 / request_id 全程不变。
+	//
+	// 用 map 而不是 struct 做 Updates：struct 会跳过零值字段，而这里恰恰需要把
+	// 零值写进去（例如发货成功时要把 error_msg 清空、失败时要把 delivered_at 置空）。
+	updates := map[string]any{
+		"status":             order.Status,
+		"updated_at":         time.Now(),
+		"supply_id":          order.SupplyID,
+		"platform_id":        order.PlatformID,
+		"platform_trade_no":  order.PlatformTradeNo,
+		"unit_price":         order.UnitPrice,
+		"total_amount":       order.TotalAmount,
+		"content":            order.Content,
+		"instruction":        order.Instruction,
+		"manual_instruction": order.ManualInstruction,
+		"error_msg":          order.ErrorMsg,
+		"error_kind":         order.ErrorKind,
+		"extra_text":         order.ExtraText,
+		"delivered_at":       order.DeliveredAt,
+	}
+	if len(order.Cards) > 0 {
+		updates["cards"] = order.Cards
+	}
+	if err := s.db.WithContext(ctx).Model(&models.Order{}).Where("id = ?", order.ID).
+		Updates(updates).Error; err != nil {
 		return nil, fmt.Errorf("保存订单失败: %w", err)
 	}
 
@@ -391,8 +445,8 @@ func (s *OrderService) createFromCardPool(
 	// ---- 先落订单骨架，拿到 ID，才能让卡密绑定到它 ----
 	if err := s.db.WithContext(ctx).Create(order).Error; err != nil {
 		if isDuplicateKey(err) {
-			// request_id 撞了：并发下另一个请求已经建好这单，回放它
-			if existing, ferr := s.findByRequestID(ctx, in.RequestID); ferr == nil && existing != nil {
+			// request_id 撞了：并发下另一个请求已经建好这单，等它出结果再回放
+			if existing, ok := s.replayExisting(ctx, in.RequestID, idempotentWait); ok {
 				return existing, nil
 			}
 		}
@@ -785,6 +839,53 @@ func (s *OrderService) attemptRecord(
 		ErrorMsg:     truncateStr(errMsg, 2000),
 		ElapsedMS:    int(time.Since(started).Milliseconds()),
 	}
+}
+
+// idempotentWait 是幂等回放时，等待「同一个 request_id 的订单跑完」的上限。
+//
+// 为什么需要等：并发提交或客户端超时重试时，先到的那个请求可能还在采购中，
+// 订单行是 purchasing。此时立刻返回，调用方拿到的是一个没有卡密的半成品；
+// 直接报错，又会让「已经成功下单」变成用户眼里的失败。折中就是等一小会儿。
+//
+// 取 1 秒的依据：单次采购（询价 + 下单）实测在 0.3~1.5 秒，等 1 秒能覆盖绝大多数
+// 情况，又不会把调用方的连接挂太久。等不到就返回 purchasing 状态，由调用方用
+// GET /api/orders/:id 继续轮询。
+const idempotentWait = time.Second
+
+// replayExisting 按 request_id 回放既有订单，必要时短暂等待它跑完。
+//
+// 返回 (order, true) 表示这个 request_id 已经有单了（无论是否已跑完）；
+// 返回 (nil, false) 表示还没有任何单，调用方可以放心地去创建。
+//
+// 关键：只有「单已存在但还在采购中」才等。单不存在时必须立刻返回 —— 否则
+// 每个新订单都要白等一次 wait，等于给全站下单加固定延迟。
+func (s *OrderService) replayExisting(ctx context.Context, requestID string, wait time.Duration) (*models.Order, bool) {
+	existing, err := s.findByRequestID(ctx, requestID)
+	if err != nil || existing == nil {
+		return nil, false
+	}
+	// 已出结果（发货成功 / 失败）或不需要等，直接回放
+	if existing.Status != models.OrderStatusPurchasing || wait <= 0 {
+		return existing, true
+	}
+
+	deadline := time.Now().Add(wait)
+	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return existing, true
+		case <-time.After(100 * time.Millisecond):
+		}
+		cur, cerr := s.findByRequestID(ctx, requestID)
+		if cerr != nil || cur == nil {
+			continue
+		}
+		existing = cur
+		if cur.Status != models.OrderStatusPurchasing {
+			break
+		}
+	}
+	return existing, true
 }
 
 func (s *OrderService) findByRequestID(ctx context.Context, requestID string) (*models.Order, error) {

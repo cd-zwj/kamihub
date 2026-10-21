@@ -31,7 +31,9 @@ func mkPaymentService(t *testing.T, db *gorm.DB, enabled bool) (*PaymentService,
 	wallet := NewWalletService(db)
 
 	cfg := testConfig()
-	ps := NewPaymentService(db, cfg, settings, wallet)
+	// shopOrders 传 nil：这里测的全是「充值入账」的资金安全场景，
+	// 走不到直付购卡的自动发货分支（那是另一组用例的事）。
+	ps := NewPaymentService(db, cfg, settings, wallet, nil)
 
 	// 写支付设置
 	pay := DefaultPaymentSettings()
