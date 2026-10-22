@@ -217,6 +217,15 @@ func (h *Handlers) Register(r *gin.Engine) {
 	shop.GET("/listings", h.shopListListings)
 	shop.GET("/listings/:id", h.shopGetListing)
 
+	// 验证码：挂 /api/shop/captcha 这一份，是因为 C 端 axios 实例的 baseURL
+	// 就是 /api/shop，而前端写的是 http.get('/captcha')。
+	//
+	// 之前只挂了 /api/captcha，前端实际请求 /api/shop/captcha 拿到 404；
+	// 前端对取题失败又是「静默忽略」（catch 里不提示），于是表现为
+	// 「注册页点『获取验证码』没反应」＋「注册永远提示请先获取验证码」。
+	// 两个路径同时保留：老页面与 scripts/ 里的验证脚本各用各的，都不受影响。
+	shop.GET("/captcha", h.getCaptcha)
+
 	// ---------- 匿名购买 / 匿名查单（公开，凭邮箱 + 6 位安全密码）----------
 	//
 	// 不注册账号也能买：下单时用邮箱 + 自设的 6 位安全密码，

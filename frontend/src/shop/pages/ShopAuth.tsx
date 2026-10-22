@@ -26,9 +26,13 @@ export default function ShopAuth() {
     try {
       const ch = await shopApi.captcha();
       setCaptcha({ id: ch.captcha_id, question: ch.question });
-    } catch {
-      // 验证码服务不可用时后端会放行；这里不阻断用户操作
+    } catch (e) {
+      // 以前这里是静默失败：按钮点了没反应，用户只会觉得「网站坏了」。
+      // 现在把失败原因显式抛出来，客服一眼就能判断是接口 404 还是网络问题。
       setCaptcha(null);
+      message.error(
+        e instanceof Error ? `验证码获取失败：${e.message}` : '验证码获取失败，请刷新重试',
+      );
     } finally {
       setCaptchaLoading(false);
     }

@@ -29,44 +29,59 @@ import (
 const (
 	// guestIPLimit 单 IP 的窗口与次数。
 	//
-	// 定得比邮箱级宽松：同一出口 IP 后面可能坐着多个买家
-	// （公司网络 / 网吧 / 运营商 NAT），按 IP 卡太死会误伤正常用户。
-	// 真正的防爆破交给「邮箱级限流 + 连续失败锁定」这两道。
-	guestIPLimit  = 60
+	// 这个阈值必须能装下「付款后轮询」：前端每 3~5 秒查一次支付状态，
+	// 一笔订单最多会打上百次。原来定成 60 次/10 分钟，一个人连买两单、
+	// 或同一条宽带/公司 NAT 后坐两个人，就会把出口 IP 打满。
+	guestIPLimit  = 600
 	guestIPWindow = 10 * time.Minute
 
-	// guestEmailLimit 单邮箱窗口：防止盯着一个邮箱暴力猜 6 位密码
-	guestEmailLimit  = 8
-	guestEmailWindow = 30 * time.Minute
-
-	// guestFailLock 连续失败 N 次后锁定多久
+	// guestFailThreshold 单邮箱连续失败 N 次后锁定多久。
+	// 这是真正防「6 位数字爆破」的那一道：只有**凭据错误**才计数，
+	// 正常下单、正常查单、付款后的轮询都不会消耗它。
 	guestFailThreshold = 5
 	guestFailLock      = 30 * time.Minute
+
+	// guestFailIPThreshold 单 IP 连续失败上限，防止「换邮箱喷洒」绕过邮箱级锁定
+	guestFailIPThreshold = 30
 )
 
-// guestGate 做匿名接口的三层限流。
+// guestGate 做匿名接口的限流与爆破防护。
 //
-// 返回 false 表示应当拒绝（已经写好响应）。
+// 历史教训（2026-10-22 线上事故）：
+// 老实现里有一道「单邮箱 8 次 / 30 分钟」的固定窗口限流，而且**每个请求都计数**。
+// 但匿名购买的付款后轮询本身就是每 3 秒一次 —— 买家付完款 24 秒后额度就打满，
+// 之后连「查支付状态」和「订单查询」都被一起拒 30 分钟，
+// 表现为「付了钱却跳不到卡密页」「订单查询提示过于频繁」。
+//
+// 现在的口径：**频率限制只管 IP（宽松），爆破限制只管失败次数（严格）**。
+// 成功请求不再消耗任何「次数」额度，所以正常买家永远撞不到限流。
 func (h *Handlers) guestGate(c *gin.Context, email string) bool {
 	ctx := c.Request.Context()
 	ip := c.ClientIP()
 	email = service.NormalizeGuestEmail(email)
 
-	if h.cache != nil {
-		if !h.cache.Allow(ctx, "guest:ip:"+ip, guestIPLimit, guestIPWindow) {
-			Fail(c, 429, "TOO_MANY_REQUESTS", "操作过于频繁，请稍后再试")
-			return false
-		}
-		if email != "" && !h.cache.Allow(ctx, "guest:mail:"+email, guestEmailLimit, guestEmailWindow) {
-			Fail(c, 429, "TOO_MANY_REQUESTS", "该邮箱尝试过于频繁，请 30 分钟后再试")
-			return false
-		}
-		// 连续失败锁定：密码连错 5 次锁 30 分钟，避免被慢速爆破
-		if email != "" && !h.cache.AllowN(ctx, "guest:fail:"+email, guestFailThreshold) {
-			Fail(c, 429, "TOO_MANY_REQUESTS", "安全密码错误次数过多，请 30 分钟后再试")
-			return false
-		}
+	if h.cache == nil {
+		return true
 	}
+
+	// 1) 单 IP 频率：只为挡住「把接口打爆」，不是给正常买家设的门槛
+	if !h.cache.Allow(ctx, "guest:ip:"+ip, guestIPLimit, guestIPWindow) {
+		Fail(c, 429, "TOO_MANY_REQUESTS", "操作过于频繁，请稍后再试")
+		return false
+	}
+
+	// 2) 单邮箱连续失败锁定：密码连错 5 次锁 30 分钟
+	if email != "" && !h.cache.AllowN(ctx, "guest:fail:"+email, guestFailThreshold) {
+		Fail(c, 429, "TOO_MANY_REQUESTS", "安全密码错误次数过多，请 30 分钟后再试")
+		return false
+	}
+
+	// 3) 单 IP 连续失败锁定：防止换着邮箱撞 6 位密码
+	if !h.cache.AllowN(ctx, "guest:failip:"+ip, guestFailIPThreshold) {
+		Fail(c, 429, "TOO_MANY_REQUESTS", "操作过于频繁，请稍后再试")
+		return false
+	}
+
 	return true
 }
 
@@ -75,11 +90,14 @@ func (h *Handlers) guestRecordFail(c *gin.Context, email string) {
 	if h.cache == nil {
 		return
 	}
+	ctx := c.Request.Context()
+	// 失败才计数：这是「爆破防护」而不是「频率限制」
+	h.cache.Fail(ctx, "guest:failip:"+c.ClientIP(), guestFailLock)
 	email = service.NormalizeGuestEmail(email)
 	if email == "" {
 		return
 	}
-	h.cache.Fail(c.Request.Context(), "guest:fail:"+email, guestFailLock)
+	h.cache.Fail(ctx, "guest:fail:"+email, guestFailLock)
 }
 
 // guestResetFail 凭据成功后清空失败计数。
@@ -87,7 +105,9 @@ func (h *Handlers) guestResetFail(c *gin.Context, email string) {
 	if h.cache == nil {
 		return
 	}
-	h.cache.Reset(c.Request.Context(), "guest:fail:"+service.NormalizeGuestEmail(email))
+	ctx := c.Request.Context()
+	h.cache.Reset(ctx, "guest:fail:"+service.NormalizeGuestEmail(email))
+	h.cache.Reset(ctx, "guest:failip:"+c.ClientIP())
 }
 
 // abortGuest 把匿名相关错误映射成合适的 HTTP 响应。

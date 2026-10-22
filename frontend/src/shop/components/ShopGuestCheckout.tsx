@@ -61,8 +61,17 @@ export default function ShopGuestCheckout(props: GuestCheckoutProps) {
   const [payResult, setPayResult] = useState<ShopCreatePaymentResult | null>(null);
   const [order, setOrder] = useState<ShopPurchaseResult | null>(null);
   const [failMsg, setFailMsg] = useState('');
-  const [email, setEmail] = useState('');
-  const [pin, setPin] = useState('');
+  const [throttled, setThrottled] = useState(false);
+
+  // 凭据放 ref，不放 state。
+  //
+  // 踩过的坑：轮询用的是 setInterval 里捕获的那个 checkStatus，
+  // 而它在 handleSubmit 那次渲染时创建 —— 那一刻 setEmail/setPin 刚被调用，
+  // state 还没更新，闭包里拿到的仍是空字符串。结果每一轮询都是「空邮箱」，
+  // 后端直接 400，页面永远停在「等待支付完成」，卡密出不来。
+  // 用 ref 存凭据，任何时候读到的都是最新值。
+  const emailRef = useRef('');
+  const pinRef = useRef('');
 
   const timerRef = useRef<number | null>(null);
   const requestIdRef = useRef<string>('');
@@ -82,6 +91,7 @@ export default function ShopGuestCheckout(props: GuestCheckoutProps) {
       setOrder(null);
       setPayResult(null);
       setFailMsg('');
+      setThrottled(false);
       setQty(Math.max(1, minQty || 1));
       requestIdRef.current = newRequestId();
       stopPolling();
@@ -94,7 +104,11 @@ export default function ShopGuestCheckout(props: GuestCheckoutProps) {
   const checkStatus = useCallback(
     async (tradeNo: string) => {
       try {
-        const res = await shopApi.guest.paymentStatus({ email, pin, trade_no: tradeNo });
+        const res = await shopApi.guest.paymentStatus({
+          email: emailRef.current,
+          pin: pinRef.current,
+          trade_no: tradeNo,
+        });
         if (res.payment.status !== 'paid') return;
         const p = res.purchase ?? null;
         if (p && !p.ok && !p.attempted) return; // 发货还在跑，继续等
@@ -106,11 +120,17 @@ export default function ShopGuestCheckout(props: GuestCheckoutProps) {
         }
         setFailMsg(p?.message || '当前商品发货失败，钱已自动退回余额，请稍后重新下单');
         setStep('failed');
-      } catch {
-        // 轮询失败不打断，等下一次
+      } catch (e) {
+        // 被限流时别再死循环刷：停下来，提示用户稍后自己查
+        const msg = e instanceof Error ? e.message : '';
+        if (msg.includes('频繁')) {
+          stopPolling();
+          setThrottled(true);
+        }
+        // 其它错误（网络抖动等）不打断，等下一次
       }
     },
-    [email, pin, stopPolling],
+    [stopPolling],
   );
 
   const handleSubmit = async () => {
@@ -121,8 +141,9 @@ export default function ShopGuestCheckout(props: GuestCheckoutProps) {
       return;
     }
     setCreating(true);
-    setEmail(values.email.trim());
-    setPin(values.pin);
+    emailRef.current = values.email.trim();
+    pinRef.current = values.pin;
+    setThrottled(false);
 
     // 必须在 await 之前占窗口，否则会被当成广告弹窗拦掉
     const pendingWindow = window.open('about:blank', '_blank');
@@ -155,13 +176,16 @@ export default function ShopGuestCheckout(props: GuestCheckoutProps) {
       }
       if (pay.form_html || pay.pay_url) message.info('请在新打开的页面完成支付');
 
-      // 付款后轮询发货结果（每 3 秒，最多 5 分钟）
+      // 付款后轮询发货结果（每 5 秒，最多 10 分钟）。
+      //
+      // 间隔从 3 秒放宽到 5 秒：后端每次轮询都要做一次 bcrypt 校验，
+      // 打太密既没必要（易支付回调本身是秒级）也更容易撞限流。
       let count = 0;
       timerRef.current = window.setInterval(() => {
         count += 1;
-        if (count > 100) stopPolling();
+        if (count > 120) stopPolling();
         void checkStatus(pay.trade_no);
-      }, 3000);
+      }, 5000);
     } catch (e) {
       pendingWindow?.close();
       message.error(e instanceof Error ? e.message : '发起支付失败');
@@ -257,6 +281,15 @@ export default function ShopGuestCheckout(props: GuestCheckoutProps) {
         description="请在新打开的页面完成支付宝付款。付款完成后本窗口会自动显示卡密/提货链接，请勿关闭。"
         style={{ marginBottom: 16 }}
       />
+      {throttled && (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message="查询太频繁，已暂停自动刷新"
+          description="如果已经付款成功，请到「订单查询」页用同一邮箱 + 安全密码查看卡密；那边不受自动刷新影响。"
+        />
+      )}
       {payResult && (
         <Descriptions size="small" column={1}>
           <Descriptions.Item label="支付单号">{payResult.trade_no}</Descriptions.Item>
