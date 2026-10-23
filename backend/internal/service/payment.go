@@ -32,6 +32,36 @@ var (
 	ErrPaymentTooMany     = errors.New("有待支付的订单，请先完成或等待超时")
 )
 
+// maxAmountDrift 上游实际支付金额与本地记录金额之间允许的最大正偏差（元）。
+//
+// 为什么需要容忍（2026-10-23 实测 521cd）：
+// 这类易支付网关为了避免「同一金额的多笔未支付订单」在回调时分不清是谁付的，
+// 会在下单时把重复金额**自动 +0.01**。实测连下 3 单同价商品：
+//
+//	本地 85.00 → 上游 85.01 / 85.02 / 85.03
+//
+// 于是买家支付宝里实际付的是 85.02，而我们记的是 85.00。
+// 原来用严格相等校验，这种单会被直接拒掉 —— 买家付了钱却不到账、不发货，
+// 表现出来就是「付完款没反应 / 匿名下单有问题」。
+//
+// 容忍度只给 0.10 元：覆盖网关的几分钱微调，又不给「少付一大截」留口子。
+// 判定规则见 amountAcceptable：**多付 ≤0.10 放行，少付一律拒绝**。
+const maxAmountDrift = 0.10
+
+// amountAcceptable 上游金额是否可以接受并据以入账。
+//
+//   - remote < local（少付）：拒绝。否则「付 0.01 元拿 100 元货」就成立了。
+//   - local ≤ remote ≤ local+0.10（多付一点点）：放行，按 local 入账。
+//     多出来的部分是网关的金额去重微调，不该让买家为它拿不到货。
+//   - remote 超出 local+0.10：拒绝并留痕，交给人工核对（可能是配错价）。
+func amountAcceptable(local, remote decimal.Decimal) bool {
+	diff := remote.Sub(local)
+	if diff.IsNegative() {
+		return false
+	}
+	return diff.LessThanOrEqual(decimal.NewFromFloat(maxAmountDrift))
+}
+
 // PaymentService 处理第三方支付（易支付）的充值。
 //
 // 资金安全的四条底线，都在这个文件里：
@@ -410,16 +440,24 @@ func (s *PaymentService) HandleNotify(ctx context.Context, params map[string]str
 			return nil
 		}
 
-		// 金额必须一致。用 decimal 比较，避免浮点误差。
+		// 金额核对。用 decimal 比较，避免浮点误差。
+		//
+		// 注意这里不是「严格相等」：网关会把重复金额自动 +0.01（见 maxAmountDrift），
+		// 严格相等会把这类正常付款直接拒掉。规则是「少付拒绝，多付 ≤0.10 放行」，
+		// 入账永远按本地金额 localAmount，多付的几分钱不进余额。
 		localAmount := po.Amount
 		remoteAmount := decimal.NewFromFloat(paidAmount).Round(2)
-		if !localAmount.Equal(remoteAmount) {
+		if !amountAcceptable(localAmount, remoteAmount) {
 			slog.Error("支付回调金额不一致，拒绝入账",
 				"trade_no", tradeNo,
 				"local", localAmount.String(), "remote", remoteAmount.String())
 			handled = false
 			reason = "金额不一致"
 			return nil
+		}
+		if !localAmount.Equal(remoteAmount) {
+			slog.Warn("上游金额与本地存在小额偏差，按本地金额入账",
+				"trade_no", tradeNo, "local", localAmount.String(), "remote", remoteAmount.String())
 		}
 
 		// ---- 入账 ----
@@ -582,8 +620,12 @@ func (s *PaymentService) settlePaid(ctx context.Context, po *models.PaymentOrder
 		}
 
 		remote := decimal.NewFromFloat(paidAmount).Round(2)
-		if !cur.Amount.Equal(remote) {
+		if !amountAcceptable(cur.Amount, remote) {
 			return fmt.Errorf("查单金额不一致：本地 %s，上游 %s", cur.Amount.String(), remote.String())
+		}
+		if !cur.Amount.Equal(remote) {
+			slog.Warn("主动查单金额与本地存在小额偏差，按本地金额入账",
+				"trade_no", cur.TradeNo, "local", cur.Amount.String(), "remote", remote.String())
 		}
 
 		var buyer models.Buyer
