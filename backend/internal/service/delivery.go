@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"gorm.io/gorm"
 
@@ -382,9 +383,30 @@ func (s *DeliveryService) ListExpiredBefore(ctx context.Context, t time.Time) ([
 	return out, err
 }
 
+// truncateStr 按**字节**上限截断字符串，且保证不切坏 UTF-8。
+//
+// 为什么必须按字符边界收尾（2026-10-23 线上故障）：
+// 直付购卡时商品名是 truncateStr(title, 40) 拼出来的，直接 s[:40] 会把
+// 一个 3 字节的汉字劈成两半，得到非法 UTF-8。这个字符串会原样进到
+// 易支付的 name 参数里，上游解析失败后只回一句
+// 「创建订单失败,请联系客服人员」—— 买家点了「去支付」看到一行字，
+// 既付不了款也不知道为什么，只能反复重试。
+//
+// 现在：超长时从 n 往前退到合法的 UTF-8 边界（最多退 3 个字节）。
 func truncateStr(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
 	if len(s) <= n {
 		return s
 	}
-	return s[:n]
+	cut := n
+	for cut > 0 && !utf8.ValidString(s[:cut]) {
+		cut--
+	}
+	if cut == 0 {
+		return ""
+	}
+	return s[:cut]
 }
+

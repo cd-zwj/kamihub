@@ -197,7 +197,17 @@ func createRedirectPage(ctx context.Context, cfg Config, in CreateInput) (*Creat
 
 	// 少数网关仍返回自动提交的 HTML 表单：与标准接入方式一致地兜住
 	if res.Status == http.StatusOK && body != "" {
-		return &CreateResult{FormHTML: body, PayURL: endpoint, Raw: body}, nil
+		if looksLikePayPage(body) {
+			return &CreateResult{FormHTML: body, PayURL: endpoint, Raw: body}, nil
+		}
+		// 上游把失败写成了「HTTP 200 + 一行字」。真实样例：
+		//
+		//	创建订单失败,请联系客服人员
+		//
+		// 以前这里一律当成「自动提交表单」返回成功，于是前端把这一行字
+		// 写进新窗口 —— 买家看到一片空白加一句话，既付不了款也拿不到任何
+		// 提示，只能反复点「去支付」再放弃。必须当失败处理并把原话带出来。
+		return nil, fmt.Errorf("易支付下单失败：%s", truncate(htmlToText(body), 200))
 	}
 
 	return nil, fmt.Errorf("易支付返回异常（HTTP %d）：%s", res.Status, truncate(body, 300))
@@ -271,4 +281,43 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+// looksLikePayPage 判断上游返回的 HTML 是不是「能把人送进收银台」的页面。
+//
+// 判据刻意宽松（有表单 / 有跳转脚本 / 有收银台链接任一即可），
+// 因为各家魔改版的自动提交写法不一样；这里只要求「不是一段纯文字」。
+func looksLikePayPage(body string) bool {
+	lower := strings.ToLower(body)
+	for _, marker := range []string{"<form", "location.href", "location.replace", "window.location", "/pay/"} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// htmlToText 把一小段 HTML 压成一行可读文字，用于把上游错误原话写进日志/提示。
+func htmlToText(body string) string {
+	s := body
+	if i := strings.Index(strings.ToLower(s), "<body"); i >= 0 {
+		s = s[i:]
+	}
+	// 去标签 + 常见实体
+	var b strings.Builder
+	inTag := false
+	for _, r := range s {
+		switch {
+		case r == '<':
+			inTag = true
+		case r == '>':
+			inTag = false
+		case !inTag:
+			b.WriteRune(r)
+		}
+	}
+	out := b.String()
+	out = strings.NewReplacer("&nbsp;", " ", "&amp;", "&", "&lt;", "<", "&gt;", ">").Replace(out)
+	out = strings.Join(strings.Fields(out), " ")
+	return out
 }
