@@ -30,6 +30,13 @@ export default class ErrorBoundary extends Component<Props, State> {
   componentDidCatch(error: Error, info: ErrorInfo) {
     // 保留完整堆栈，方便在控制台定位是哪个页面、哪一行
     console.error('[kamihub] 页面渲染异常：', error, info.componentStack);
+
+    // React #310（hook 数量不一致）这类错误的本质是「组件树已经不可信」，
+    // 点「重试」只会让它用同样错乱的 hooks 再渲染一次，于是又抛一次 #310，
+    // 用户就卡在错误页里反复点重试。这里直接整页刷新，把状态彻底重置。
+    if (/Minified React error #3(0|1)\d/i.test(error.message) || /Rendered more hooks/i.test(error.message)) {
+      window.location.reload();
+    }
   }
 
   componentDidUpdate(prev: Props) {

@@ -55,6 +55,14 @@ export default function GoodsPage() {
   // 混合模式的两个通道开关：既吃卡密池也走上游
   const usesCardPool = stockMode === STOCK_MODE_LOCAL || stockMode === STOCK_MODE_HYBRID;
   const usesUpstream = stockMode === STOCK_MODE_UPSTREAM || stockMode === STOCK_MODE_HYBRID;
+  // 成本红线提示要用的当前值。
+  //
+  // 必须提到这里，不能写在下面的渲染回调里 —— 那里是「有货源成本才渲染」的
+  // IIFE，把 hook 放在条件 return 之后会让两次渲染的 hook 数量不一致：
+  //   第一次（成本还没回填）不调 hook，第二次（数据到了）调了 hook
+  //   → React #310「Rendered more hooks than during the previous render」
+  // 线上表现就是：后台「商品与货源」点「编辑」直接白屏。
+  const maxSupplyPriceWatch = Form.useWatch('max_supply_price', form);
 
   // 卡密池抽屉（仅自建商品用）
   const [cardGoods, setCardGoods] = useState<Goods | null>(null);
@@ -826,7 +834,7 @@ export default function GoodsPage() {
               .map((s) => Number(s.cost_price));
             if (costs.length === 0) return null;
             const minCost = Math.min(...costs);
-            const current = Number(Form.useWatch('max_supply_price', form) ?? 0);
+            const current = Number(maxSupplyPriceWatch ?? 0);
             // 建议值：最低成本上浮 10%，给涨价留一点缓冲又不至于没约束
             const suggested = Math.ceil(minCost * 1.1 * 100) / 100;
 
