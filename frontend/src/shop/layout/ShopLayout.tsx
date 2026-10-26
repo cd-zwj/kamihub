@@ -13,7 +13,6 @@ import {
 import {
   ApiOutlined,
   ClockCircleOutlined,
-  CrownOutlined,
   CustomerServiceOutlined,
   HomeOutlined,
   KeyOutlined,
@@ -83,8 +82,8 @@ export default function ShopLayout() {
     // 免注册购买的订单用「邮箱 + 6 位安全密码」查，独立入口避免和老订单混淆
     { key: '/guest-orders', label: '订单查询', icon: <SearchOutlined /> },
     { key: '/wallet', label: '我的钱包', icon: <WalletOutlined /> },
-    // 销售中心：普通买家点进去看到的是「申请开通」页，不影响转化
-    { key: '/agent', label: '销售中心', icon: <CrownOutlined /> },
+    // 销售中心已于 2026-10-21 按运营要求下线（入口与路由同时移除）。
+    // 相关页面 AgentCenter.tsx 与后端接口保留在仓库里，需要时可恢复。
   ];
 
   /** 当前路径是否命中某个导航项 */

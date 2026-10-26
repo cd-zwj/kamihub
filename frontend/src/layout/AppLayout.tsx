@@ -3,7 +3,7 @@ import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { Avatar, Button, Dropdown, Form, Input, Layout, Menu, Modal, Space, Tag, Tooltip, message } from 'antd';
 import type { MenuProps } from 'antd';
 import {
-  ApiOutlined, AppstoreOutlined, BookOutlined, CrownOutlined, CustomerServiceOutlined, DashboardOutlined,
+  ApiOutlined, AppstoreOutlined, BookOutlined, CustomerServiceOutlined, DashboardOutlined,
   FileSearchOutlined, FileTextOutlined, ImportOutlined, KeyOutlined, LinkOutlined, LogoutOutlined,
   MoonOutlined, SafetyOutlined, SettingOutlined, ShoppingCartOutlined, SunOutlined, TeamOutlined,
   ThunderboltOutlined, UserOutlined, WalletOutlined,
@@ -68,7 +68,7 @@ export default function AppLayout() {
       children: isAdmin
         ? [
             { key: '/admin/shop-admin', icon: <WalletOutlined />, label: <Link to="/admin/shop-admin">C 端商城</Link> },
-            { key: '/admin/agent', icon: <CrownOutlined />, label: <Link to="/admin/agent">销售与专价</Link> },
+            // 「销售与专价」已于 2026-10-21 按运营要求下线（入口 + 路由同时移除）
             { key: '/admin/users', icon: <TeamOutlined />, label: <Link to="/admin/users">用户</Link> },
           ]
         : [],

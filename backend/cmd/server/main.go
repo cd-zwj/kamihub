@@ -58,16 +58,16 @@ func main() {
 
 // deps 组装好的依赖。抽出来是为了让「起 HTTP」和「起 worker」共用同一份装配。
 type deps struct {
-	cfg       *config.Config
-	db        *gorm.DB
-	cache     *cache.Client
-	registry  *platform.Registry
-	platforms *service.PlatformService
-	goods     *service.GoodsService
-	cards     *service.CardService
-	orders    *service.OrderService
-	settings  *service.SettingsService
-	audit     *service.AuditService
+	cfg        *config.Config
+	db         *gorm.DB
+	cache      *cache.Client
+	registry   *platform.Registry
+	platforms  *service.PlatformService
+	goods      *service.GoodsService
+	cards      *service.CardService
+	orders     *service.OrderService
+	settings   *service.SettingsService
+	audit      *service.AuditService
 	deliveries *service.DeliveryService
 
 	buyerAuth  *service.BuyerAuthService
@@ -81,7 +81,7 @@ type deps struct {
 	// tickets 买家工单（售后咨询）
 	tickets *service.TicketService
 	// guests 匿名购买（邮箱 + 6 位安全密码）
-	guests   *service.GuestService
+	guests    *service.GuestService
 	reconcile *service.ReconcileService
 
 	notifier *notify.Notifier
@@ -346,6 +346,13 @@ func bootstrap(cfg *config.Config) (*deps, error) {
 	// 把档位定价装配进 ListingService —— 不装配时所有买家按零售价，
 	// 这是「阶梯专价总开关关闭」时的等价行为。
 	listings.WithPricing(pricingSvc)
+	// 「先占后拿」：创建支付单时预占卡密，付款成功后直接转 sold。
+	// 装配在两处 —— 支付侧负责占（CreatePay）、下单侧负责拿（Purchase）。
+	payment.WithCards(cards)
+	shopOrders.WithCards(cards)
+	// 上游库存缓存过期时，下单前强制实时询价一次：
+	// 免得「上游早没货了，商城里还显示有货」，收了钱再退款。
+	listings.WithStockRefresher(goods.RefreshStaleSupplyStock)
 	slog.Info("阶梯专价已装配", "fee_rate", cfg.Pricing.FeeRate,
 		"enabled", agentSvc.Enabled(context.Background()))
 
@@ -383,6 +390,8 @@ func bootstrap(cfg *config.Config) (*deps, error) {
 			Payment:   payment,
 			Reconcile: reconcile,
 			Agent:     agentSvc,
+			// 卡密池：定时清理过期预占（买家点了去支付又关页面）
+			Cards: cards,
 		}, notifier)
 		workerRunner = worker.New(worker.Deps{DB: db, Notify: notifier, Tasks: tasks})
 		slog.Info("定时任务已装配", "count", len(tasks))

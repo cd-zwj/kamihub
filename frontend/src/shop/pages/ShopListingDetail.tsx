@@ -58,7 +58,13 @@ const COVER_PALETTES: Array<[string, string, string]> = [
 ];
 
 /** 库存语义统一：缺货 / 将罄 / 充足（不暴露内部供货方式） */
-function detailStockBadge(stock: number): { color: string; text: string } {
+function detailStockBadge(
+  stock: number,
+  stale?: boolean,
+  exact?: boolean,
+): { color: string; text: string } {
+  // 缓存过期：数字不可信，不判缺货也不吹有货
+  if (stale && !exact) return { color: 'default', text: '库存待确认' };
   if (stock === 0) return { color: 'default', text: '暂时缺货' };
   if (stock > 0 && stock <= 5) return { color: 'orange', text: `仅剩 ${stock} 件` };
   // stock = -1 表示货源实时供货，对买家统一说「库存充足」，
@@ -173,7 +179,7 @@ export default function ShopListingDetail() {
     .join(' · ');
   const balance = Number(buyer?.balance ?? 0);
   const notEnough = buyer ? balance < total : false;
-  const soldOut = item ? isSoldOut(item.stock, item.stock_exact) : false;
+  const soldOut = item ? isSoldOut(item.stock, item.stock_exact, item.stock_stale) : false;
   const alipayAvailable = Boolean(payInfo?.available);
 
   // 余额不够时自动切到支付宝，省得买家还要自己点一下。
@@ -446,7 +452,7 @@ export default function ShopListingDetail() {
 
             <Space size={8} style={{ marginBottom: 14 }} wrap>
               {(() => {
-                const b = detailStockBadge(item.stock);
+                const b = detailStockBadge(item.stock, item.stock_stale, item.stock_exact);
                 return <Tag color={b.color}>{b.text}</Tag>;
               })()}
               {item.sold_count > 0 && <Tag>已售 {item.sold_count}</Tag>}

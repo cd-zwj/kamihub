@@ -60,6 +60,25 @@ func (h *Handlers) adminSetListingTiers(c *gin.Context) {
 	OK(c, gin.H{"ok": true})
 }
 
+// optionalBuyerID 尝试从请求里解析买家身份，未登录返回 0。
+//
+// 用于「公开但可以带身份」的接口（报价、库存展示）：解析失败不报错，
+// 退回零售口径 —— 报价只是一次展示，不该因为令牌过期而整页报错。
+func (h *Handlers) optionalBuyerID(c *gin.Context) uint {
+	if h.buyerAuth == nil {
+		return 0
+	}
+	token := extractToken(c)
+	if token == "" {
+		return 0
+	}
+	claims, err := h.buyerAuth.ParseBuyerToken(token)
+	if err != nil || claims == nil {
+		return 0
+	}
+	return claims.BuyerID
+}
+
 // shopQuoteListing 买家端实时报价。
 //
 // 前端改数量时调它，用来显示「合计」「已省 X 元」
@@ -81,7 +100,15 @@ func (h *Handlers) shopQuoteListing(c *gin.Context) {
 		qty = n
 	}
 
-	quote, err := h.shopOrders.Quote(c.Request.Context(), id, qty)
+	// 带上买家身份报价。
+	//
+	// 这是「页面显示 10 元、实际扣 9 元」的根因：报价原来固定按零售价
+	// （BuyerQuote buyerID=0），而真正下单走的是档位专价。代理/销售买家
+	// 看到的应付金额永远是错的，付款时自然对不上。
+	//
+	// 令牌是可选的：未登录（匿名浏览）仍按零售价报，与以前一致。
+	buyerID := h.optionalBuyerID(c)
+	quote, err := h.shopOrders.QuoteFor(c.Request.Context(), id, qty, buyerID)
 	if err != nil {
 		switch {
 		case errors.Is(err, service.ErrListingNotFound):
@@ -127,4 +154,3 @@ func (h *Handlers) shopQuoteListing(c *gin.Context) {
 	}
 	OK(c, out)
 }
-

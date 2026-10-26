@@ -18,6 +18,7 @@ import {
 import { shopApi } from '@/shop/api/shopClient';
 import type { ShopListing } from '@/shop/api/shopClient';
 import { formatMoney, SHOP_THEME, useIsMobile } from '@/shop/layout/ShopLayout';
+import { isSoldOut } from '@/shop/components/StockTag';
 
 /**
  * 无封面图时，按商品 id 生成稳定且有辨识度的视觉。
@@ -55,6 +56,8 @@ function coverIcon(title: string) {
  * 注意：绝不能出现「上游 / 代发」——那等于自曝中间商身份。
  */
 function stockLine(item: ShopListing): { parts: string[]; dim: boolean } {
+  // 上游缓存过期：不判缺货也不吹有货，交给下单时实时确认
+  if (item.stock_stale && !item.stock_exact) return { parts: ['库存待确认', '自动交付'], dim: false };
   if (item.stock === 0) return { parts: ['暂时缺货'], dim: true };
   if (item.stock > 0 && item.stock <= 5) return { parts: [`仅剩 ${item.stock} 件`, '自动交付'], dim: false };
   return { parts: ['有库存', '自动交付'], dim: false };
@@ -62,7 +65,7 @@ function stockLine(item: ShopListing): { parts: string[]; dim: boolean } {
 
 function ProductCard({ item, onOpen }: { item: ShopListing; onOpen: () => void }) {
   const isMobile = useIsMobile();
-  const soldOut = item.stock === 0;
+  const soldOut = isSoldOut(item.stock, item.stock_exact, item.stock_stale);
   const [, , ink] = COVER_PALETTES[item.id % COVER_PALETTES.length];
   const [from, to] = COVER_PALETTES[item.id % COVER_PALETTES.length];
   const Icon = coverIcon(item.title);

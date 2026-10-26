@@ -36,6 +36,18 @@ type ShopOrderService struct {
 	listings *ListingService
 	wallet   *WalletService
 	orders   *OrderService
+	// cards 卡密池。用于释放「付款失败后」仍挂着的预占（先占后拿）。
+	// 为 nil 时退化成没有预占的老行为，不影响其它流程。
+	cards *CardService
+}
+
+// WithCards 装配卡密池服务。
+//
+// 用 setter 而不是改构造函数签名：现有测试都是四参数构造，
+// 改签名会波及一片无关测试；而且 cards 为 nil 本身是一个有意义的降级。
+func (s *ShopOrderService) WithCards(c *CardService) *ShopOrderService {
+	s.cards = c
+	return s
 }
 
 func NewShopOrderService(db *gorm.DB, listings *ListingService, wallet *WalletService, orders *OrderService) *ShopOrderService {
@@ -51,6 +63,9 @@ type ShopPurchaseInput struct {
 	RequestID string
 	// ClientIP 用于风控日志
 	ClientIP string
+	// HoldRequestID 创建支付单时预占卡密所用的键（"先占后拿"）。
+	// 非空表示这笔购买的卡密已经占好了，发货时直接吃预占。
+	HoldRequestID string
 }
 
 // ShopQuote 一次下单的服务端权威报价。
@@ -66,6 +81,16 @@ type ShopQuote struct {
 	Quantity  int             `json:"quantity"`
 	UnitPrice decimal.Decimal `json:"unit_price"`
 	Total     decimal.Decimal `json:"total"`
+
+	// GoodsID / StockMode 供「创建支付单时预占卡密」判断用。
+	// 只吃上游的商品没有可预占的实体，StockMode 会告诉调用方要不要占。
+	GoodsID   uint `json:"goods_id"`
+	StockMode int  `json:"stock_mode"`
+}
+
+// UsesCardPool 该报价对应的商品是否可能从自带卡密池发货（自有 / 混合）
+func (q *ShopQuote) UsesCardPool() bool {
+	return q != nil && (q.StockMode == models.StockModeLocal || q.StockMode == models.StockModeHybrid)
 }
 
 // Quote 按 C 端售价算一单要多少钱。
@@ -74,10 +99,18 @@ type ShopQuote struct {
 // 前端传的 amount 会被这里算出来的值覆盖，防止有人改前端把 7.5 元
 // 的商品用 0.01 元买走。
 func (s *ShopOrderService) Quote(ctx context.Context, listingID uint, quantity int) (*ShopQuote, error) {
+	return s.QuoteFor(ctx, listingID, quantity, 0)
+}
+
+// QuoteFor 按买家身份报价（buyerID=0 表示未登录，按零售价）。
+//
+// 页面展示、支付单金额、下单扣款必须来自同一个入口，否则就会出现
+// 「页面写 10 元、实际扣 9 元」——买家看到的和付的不是一个数。
+func (s *ShopOrderService) QuoteFor(ctx context.Context, listingID uint, quantity int, buyerID uint) (*ShopQuote, error) {
 	if quantity <= 0 {
 		quantity = 1
 	}
-	listing, total, err := s.listings.BuyerQuote(ctx, listingID, quantity)
+	listing, total, err := s.listings.BuyerQuoteFor(ctx, listingID, quantity, buyerID)
 	if err != nil {
 		return nil, err
 	}
@@ -91,6 +124,8 @@ func (s *ShopOrderService) Quote(ctx context.Context, listingID uint, quantity i
 		Quantity:  quantity,
 		UnitPrice: listing.SalePrice,
 		Total:     total,
+		GoodsID:   listing.Goods.ID,
+		StockMode: listing.Goods.StockMode,
 	}, nil
 }
 
@@ -137,7 +172,22 @@ func (s *ShopOrderService) Purchase(ctx context.Context, in ShopPurchaseInput) (
 	// ---- 1. 报价：用 C 端售价算钱 ----
 	// 传入 BuyerID 让报价走档位专价；普通买家（retail）分支直接返回原价，
 	// 与改造前完全一致。
-	listing, total, err := s.listings.BuyerQuoteFor(ctx, in.ListingID, in.Quantity, in.BuyerID)
+	//
+	// reserved：本笔支付在「创建支付单」时预占掉的卡密张数。
+	// 预占状态不计入可售库存（别人不该买到），但对自己要算数 ——
+	// 否则最后一张卡会被「我自己占的货」挡在门外，付款后报假缺货。
+	var reserved int64
+	if in.HoldRequestID != "" && s.cards != nil {
+		n, cerr := s.cards.CountByHold(ctx, in.HoldRequestID)
+		if cerr != nil {
+			slog.Warn("读取卡密预占数量失败，按无预占处理",
+				"request_id", in.HoldRequestID, "error", cerr.Error())
+		} else {
+			reserved = n
+		}
+	}
+	listing, total, err := s.listings.BuyerQuoteForWithReserved(
+		ctx, in.ListingID, in.Quantity, in.BuyerID, reserved)
 	if err != nil {
 		return nil, err
 	}
@@ -181,7 +231,33 @@ func (s *ShopOrderService) Purchase(ctx context.Context, in ShopPurchaseInput) (
 		Quantity:  in.Quantity,
 		Remark:    fmt.Sprintf("C端下单 buyer=%d", in.BuyerID),
 		UserID:    nil,
+		// 有预占就直接吃预占：这是「先占后拿」闭环的最后一步
+		HoldRequestID: in.HoldRequestID,
 	})
+
+	// ---- 立刻回填 C 端归属，成功失败都要填 ----
+	//
+	// 这段原来放在「发货成功之后」，于是失败单的 buyer_id / listing_id 都是 NULL：
+	//   - 买家在「我的订单」里根本看不到这笔（列表按 buyer_id 过滤）
+	//   - 运营想按商品排障也查不到，只能去 orders 表里按时间猜
+	// 而失败提示恰恰写着「请稍后在订单列表查看」—— 点进去什么都没有。
+	// 所以归属必须在拿到 order 的瞬间就写死，与发货结果无关。
+	if order != nil {
+		if err := s.db.WithContext(ctx).Model(&models.Order{}).
+			Where("id = ?", order.ID).
+			Updates(map[string]any{
+				"buyer_id":    in.BuyerID,
+				"listing_id":  listing.ID,
+				"paid_amount": total,
+				"channel":     models.OrderChannelWeb,
+			}).Error; err != nil {
+			slog.Error("回填订单C端字段失败", "order_id", order.ID, "error", err.Error())
+		}
+		order.BuyerID = &in.BuyerID
+		order.ListingID = &listing.ID
+		order.PaidAmount = total
+		order.Channel = models.OrderChannelWeb
+	}
 
 	// 采购失败的判定分两种情况，缺一不可：
 	//
@@ -195,6 +271,7 @@ func (s *ShopOrderService) Purchase(ctx context.Context, in ShopPurchaseInput) (
 	if purchaseErr != nil {
 		s.refundQuietly(ctx, walletTx.ID, in.BuyerID, total,
 			"下单失败自动退款："+purchaseErr.Error())
+		s.releaseHoldQuietly(ctx, in.HoldRequestID)
 		return nil, purchaseErr
 	}
 	if order.Status == models.OrderStatusFailed {
@@ -207,27 +284,11 @@ func (s *ShopOrderService) Purchase(ctx context.Context, in ShopPurchaseInput) (
 		slog.Warn("C端下单发货失败，已自动退款",
 			"buyer_id", in.BuyerID, "order_no", order.OrderNo,
 			"amount", total.String(), "error", order.ErrorMsg)
+		s.releaseHoldQuietly(ctx, in.HoldRequestID)
 		return nil, fmt.Errorf("发货失败，购买金额已退回余额，请稍后在订单列表查看")
 	}
 
-	// ---- 4. 回填 C 端字段 ----
-	if err := s.db.WithContext(ctx).Model(&models.Order{}).
-		Where("id = ?", order.ID).
-		Updates(map[string]any{
-			"buyer_id":    in.BuyerID,
-			"listing_id":  listing.ID,
-			"paid_amount": total,
-			"channel":     models.OrderChannelWeb,
-		}).Error; err != nil {
-		// 回填失败不影响买家拿货，但要留下痕迹
-		slog.Error("回填订单C端字段失败", "order_id", order.ID, "error", err.Error())
-	}
-	order.BuyerID = &in.BuyerID
-	order.ListingID = &listing.ID
-	order.PaidAmount = total
-	order.Channel = models.OrderChannelWeb
-
-	// ---- 5. 结算冻结（确认发货成功后才真正扣款）----
+	// ---- 4. 结算冻结（确认发货成功后才真正扣款）----
 	if err := s.wallet.SettleFreeze(ctx, walletTx.ID, &order.ID); err != nil {
 		// 结算失败意味着钱还挂在冻结态。
 		// 货已经发了，不能再退给买家（否则等于白拿），
@@ -244,6 +305,26 @@ func (s *ShopOrderService) Purchase(ctx context.Context, in ShopPurchaseInput) (
 		"listing_id", listing.ID, "qty", in.Quantity, "paid", total.String())
 
 	return s.toResult(ctx, order, listing, total)
+}
+
+// releaseHoldQuietly 释放付款失败后还挂着的卡密预占。
+//
+// 不释放的后果最阴险：买家付款失败、钱退回了余额，但那几张卡密
+// 还以 held 状态锁着 —— 池子里越卖越少却一直卖不出去，运营看数量
+// 明明有货，买家却一直报缺货。所以任何失败路径都必须放。
+func (s *ShopOrderService) releaseHoldQuietly(ctx context.Context, holdRequestID string) {
+	if s.cards == nil || strings.TrimSpace(holdRequestID) == "" {
+		return
+	}
+	n, err := s.cards.ReleaseHold(ctx, holdRequestID)
+	if err != nil {
+		slog.Error("释放卡密预占失败，需人工核对",
+			"request_id", holdRequestID, "error", err.Error())
+		return
+	}
+	if n > 0 {
+		slog.Info("已释放卡密预占", "request_id", holdRequestID, "count", n)
+	}
 }
 
 // refundQuietly 退款并记录失败，不让退款异常盖住原始错误。

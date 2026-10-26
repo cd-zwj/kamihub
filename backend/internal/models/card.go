@@ -13,6 +13,20 @@ const (
 	CardStatusSold = 1
 	// CardStatusVoid 已作废：运营手工剔除（发错了、上游退款等）
 	CardStatusVoid = 2
+	// CardStatusHeld 预占：已被某笔「待支付」的订单占住，还没真正卖出。
+	//
+	// 为什么需要它：匿名购买是「先付款、后下单」，买家从点「去支付」到
+	// 支付宝回调到账、自动下单取卡，中间可能隔着几分钟。原来这条链路里
+	// 卡密一直是 available，别的买家（尤其秒下的登录买家）会把它买走，
+	// 于是匿名买家付款成功却收到「商品暂时缺货」—— 钱退进余额，客诉不断。
+	//
+	// 预占把这条窗口从「几分钟」压到「几毫秒」：
+	// 创建支付单时就把卡密锁成本状态，付款成功后直接转 sold，
+	// 支付超时/失败则由清理任务退回 available。
+	//
+	// 注意：预占的卡密**不计入可售库存**（CountAvailable 只数 available），
+	// 因此所有既有的「够不够卖」判断自动把预占算进去，无需各处改口径。
+	CardStatusHeld = 3
 )
 
 // CardStock 自建商品的一条卡密。
@@ -40,6 +54,15 @@ type CardStock struct {
 	Code string `gorm:"size:4096;not null;uniqueIndex" json:"code"`
 
 	Status int `gorm:"not null;default:0;index" json:"status"`
+
+	// HeldByRequest 预占这条件密的支付意图幂等键（status=held 时有值）。
+	//
+	// 用「支付意图的 request_id」而不是订单号：预占发生在**下单之前**
+	// （创建支付单时），那一刻还没有订单。付款成功后按同一个键把卡密
+	// 转成 sold 并绑定订单号，失败/超时则按键整批释放。
+	HeldByRequest string `gorm:"size:128;index" json:"held_by_request,omitempty"`
+	// HoldExpiresAt 预占失效时间。到点还没付款就自动退回可售。
+	HoldExpiresAt *time.Time `gorm:"index" json:"hold_expires_at,omitempty"`
 
 	// 售出后关联的订单，便于「这条卡密发给谁了」的追溯
 	OrderID *uint      `gorm:"index" json:"order_id"`
@@ -76,6 +99,8 @@ func (c *CardStock) StatusText() string {
 		return "已售"
 	case CardStatusVoid:
 		return "作废"
+	case CardStatusHeld:
+		return "预占中"
 	default:
 		return "未知"
 	}

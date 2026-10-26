@@ -21,7 +21,6 @@ import Tickets from '@/pages/Tickets';
 import ShopAdmin from '@/pages/ShopAdmin';
 import PaymentAdmin from '@/pages/PaymentAdmin';
 import Security from '@/pages/Security';
-import AgentAdmin from '@/pages/AgentAdmin';
 import AdminGuide from '@/docs/AdminGuide';
 
 function FullScreenSpin() {
@@ -77,7 +76,7 @@ export default function AdminApp() {
           {/* 以下仅管理员可见，非管理员访问会被兜底路由弹回概览 */}
           {isAdmin && <Route path="/admin/shop-admin" element={<ShopAdmin />} />}
           {isAdmin && <Route path="/admin/payment-admin" element={<PaymentAdmin />} />}
-          {isAdmin && <Route path="/admin/agent" element={<AgentAdmin />} />}
+          {/* /admin/agent（销售与专价）已于 2026-10-21 下线 */}
           {isAdmin && <Route path="/admin/users" element={<Users />} />}
           {isAdmin && <Route path="/admin/tokens" element={<Tokens />} />}
           {isAdmin && <Route path="/admin/admin-guide" element={<AdminGuide />} />}

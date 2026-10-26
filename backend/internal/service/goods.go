@@ -715,6 +715,47 @@ func (s *GoodsService) DeleteSupply(ctx context.Context, id uint) error {
 	return nil
 }
 
+// RefreshStaleSupplyStock 把某个商品下**缓存已过期**的货源实时询价一遍。
+//
+// 为什么需要它：库存是缓存，靠定时任务刷新（默认 2 分钟一轮）。
+// 但同步会因为「上游接口抖动 / 平台被禁用 / worker 没跑」而失败，
+// 失败时我们**刻意保留旧库存**（避免一次抖动把已知库存清成 0）。
+// 副作用是：上游早就没货了，商城还挂着「库存 5」，买家付完钱才退款。
+//
+// 所以在「下单 / 创建支付单」这种真正要花钱的时刻，对过期货源补一次实时询价：
+//   - 询价成功 → 缓存被刷成真实值，后面所有判断自动是对的
+//   - 询价失败 → 记在上游侧的 last_check_msg，缓存保持原样（不误伤）
+//
+// ttl 内刚同步过的货源会被跳过，不会每单都打上游。
+func (s *GoodsService) RefreshStaleSupplyStock(ctx context.Context, goodsID uint, ttl time.Duration) error {
+	var supplies []models.Supply
+	if err := s.db.WithContext(ctx).
+		Where("goods_id = ? AND enabled = ?", goodsID, true).
+		Find(&supplies).Error; err != nil {
+		return err
+	}
+	if len(supplies) == 0 {
+		return nil
+	}
+
+	cutoff := time.Now().Add(-ttl)
+	for i := range supplies {
+		sup := &supplies[i]
+		// 新鲜且有结论的不用动
+		fresh := sup.StockSyncedAt != nil && sup.StockSyncedAt.After(cutoff)
+		checkFailed := sup.LastCheckOK != nil && !*sup.LastCheckOK
+		if fresh && !checkFailed {
+			continue
+		}
+		if _, err := s.SyncSupplyStock(ctx, sup.ID); err != nil {
+			// 单条失败不影响其它货源，也不阻断下单：调用方会按缓存值继续判断
+			slog.Warn("下单前刷新货源库存失败",
+				"supply_id", sup.ID, "goods_id", goodsID, "error", err.Error())
+		}
+	}
+	return nil
+}
+
 // SyncSupplyStock 通过询价刷新某条货源的库存与成本缓存。
 //
 // 询价失败时：把失败原因持久化到该货源（last_check_ok / last_check_msg），

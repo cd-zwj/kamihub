@@ -4,6 +4,7 @@ import (
 	"context"
 	stdErrors "errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 	"time"
@@ -79,10 +80,15 @@ func toCardItem(c models.CardStock, reveal bool) CardItem {
 
 // Stats 卡密池统计
 type CardStats struct {
-	Total     int64 `json:"total"`
+	Total int64 `json:"total"`
+	// Available 真正可售的张数（不含预占）
 	Available int64 `json:"available"`
 	Sold      int64 `json:"sold"`
 	Void      int64 `json:"void"`
+	// Held 已被「待支付」订单预占、还没卖出的张数。
+	// Total = Available + Sold + Void + Held，单独列出来运营才不会
+	// 看到「总数比三项之和多」而怀疑数据错乱。
+	Held int64 `json:"held"`
 }
 
 // List 分页查询某商品的卡密
@@ -142,6 +148,8 @@ func (s *CardService) Stats(ctx context.Context, goodsID uint) (CardStats, error
 			st.Sold += r.N
 		case models.CardStatusVoid:
 			st.Void += r.N
+		case models.CardStatusHeld:
+			st.Held += r.N
 		}
 	}
 	return st, nil
@@ -176,6 +184,8 @@ func (s *CardService) StatsBatch(ctx context.Context, goodsIDs []uint) (map[uint
 			st.Sold += r.N
 		case models.CardStatusVoid:
 			st.Void += r.N
+		case models.CardStatusHeld:
+			st.Held += r.N
 		}
 		out[r.GoodsID] = st
 	}
@@ -373,6 +383,189 @@ func (s *CardService) DeleteBatch(ctx context.Context, goodsID uint, batchNo str
 	return tx.RowsAffected, tx.Error
 }
 
+// ---------------------------------------------------------------- 预占（先占后拿）
+
+// 预占相关错误
+var (
+	// ErrHoldNotFound 该支付意图没有任何预占（纯上游商品或已释放）
+	ErrHoldNotFound = stdErrors.New("预占不存在或已释放")
+	// ErrHoldExpired 预占已过期（买家付款太慢，卡密被收回）
+	ErrHoldExpired = stdErrors.New("预占已过期")
+)
+
+// ReserveForPayment 为一次「待支付」的购买预占 N 条卡密。
+//
+// 这是「先占后拿」的入口，只在创建支付单时调用：
+//
+//	创建支付单 → 预占卡密(status=held) → 买家付款 → 回调自动下单 → 转 sold
+//	                                        ↘ 超时/失败 → 清理任务退回 available
+//
+// 必须逐张占用而不是一条 UPDATE ... LIMIT N：只有单条语句里
+// 「选中 + 占用」同时完成，才能保证并发的两个买家不会占到同一张卡密
+// （与 TakeOne 用同一套 FOR UPDATE SKIP LOCKED 机制）。
+//
+// 占不满就整批回滚，绝不「占 3 张先发给买 5 张的人」——
+// 预占就是为了让买家付款前就知道到底有没有货。
+func (s *CardService) ReserveForPayment(
+	ctx context.Context, goodsID uint, quantity int, requestID string, ttl time.Duration,
+) (int, error) {
+	requestID = strings.TrimSpace(requestID)
+	if requestID == "" {
+		return 0, stdErrors.New("预占缺少 request_id")
+	}
+	if quantity <= 0 {
+		quantity = 1
+	}
+	expiresAt := time.Now().Add(ttl)
+
+	taken := 0
+	for i := 0; i < quantity; i++ {
+		var id uint
+		err := s.db.WithContext(ctx).Raw(reserveCardSQL,
+			models.CardStatusHeld, requestID, expiresAt, goodsID, models.CardStatusAvailable,
+		).Row().Scan(&id)
+		if err != nil {
+			// 占不满：把这一批已占的退回，保持「要么全占、要么不占」
+			if taken > 0 {
+				if _, rerr := s.ReleaseHold(ctx, requestID); rerr != nil {
+					slog.Error("预占失败后释放已占卡密出错，需人工核对",
+						"goods_id", goodsID, "request_id", requestID, "error", rerr.Error())
+				}
+			}
+			if strings.Contains(err.Error(), "no rows in result set") || err == gorm.ErrRecordNotFound {
+				return 0, ErrCardEmpty
+			}
+			return 0, fmt.Errorf("预占卡密失败：%w", err)
+		}
+		taken++
+	}
+	return taken, nil
+}
+
+// reserveCardSQL 原子「选中一条可售卡密并预占」。
+//
+// 与 TakeOne 完全同构，只是目标状态换成 held 并写入预占归属，
+// 这样 CountAvailable（只数 available）自动把预占扣掉 ——
+// 商城展示、混合模式取货计划、下单前校验全都不用改口径。
+const reserveCardSQL = `
+UPDATE card_stocks
+SET status = ?, held_by_request = ?, hold_expires_at = ?, updated_at = now()
+WHERE id = (
+    SELECT id FROM card_stocks
+    WHERE goods_id = ? AND status = ?
+    ORDER BY id
+    FOR UPDATE SKIP LOCKED
+    LIMIT 1
+)
+RETURNING id`
+
+// ReleaseHold 把某支付意图预占的卡密全部退回可售（支付失败 / 取消 / 超时）。
+func (s *CardService) ReleaseHold(ctx context.Context, requestID string) (int64, error) {
+	requestID = strings.TrimSpace(requestID)
+	if requestID == "" {
+		return 0, nil
+	}
+	res := s.db.WithContext(ctx).Model(&models.CardStock{}).
+		Where("held_by_request = ? AND status = ?", requestID, models.CardStatusHeld).
+		Updates(map[string]any{
+			"status":          models.CardStatusAvailable,
+			"held_by_request": "",
+			"hold_expires_at": nil,
+			"updated_at":      time.Now(),
+		})
+	if res.Error != nil {
+		return 0, res.Error
+	}
+	return res.RowsAffected, nil
+}
+
+// TakeHeld 把某支付意图预占的卡密直接交给订单（付款成功后的第一步）。
+//
+// 注意这里不是「先释放再 TakeOne」：那样会留出一个可被别人抢走的窗口，
+// 预占就白做了。整条 UPDATE 带 held_by_request 条件，只有这笔支付能拿走它。
+//
+// 返回实际拿到的卡密；不足数量时由调用方回落到 TakeOne 补齐
+// （例如买家加购、或预占过期后被清理）。
+func (s *CardService) TakeHeld(ctx context.Context, requestID string, orderID uint) ([]models.CardStock, error) {
+	requestID = strings.TrimSpace(requestID)
+	if requestID == "" {
+		return nil, nil
+	}
+	rows, err := s.db.WithContext(ctx).Raw(takeHeldSQL,
+		models.CardStatusSold, orderID, requestID, models.CardStatusHeld,
+	).Rows()
+	if err != nil {
+		return nil, fmt.Errorf("取预占卡密失败：%w", err)
+	}
+	defer rows.Close()
+
+	out := make([]models.CardStock, 0, 4)
+	for rows.Next() {
+		var c models.CardStock
+		if err := rows.Scan(&c.ID, &c.GoodsID, &c.Code, &c.Status, &c.OrderID,
+			&c.SoldAt, &c.BatchNo, &c.Remark, &c.CostPrice, &c.CreatedAt, &c.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("读取预占卡密失败：%w", err)
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+const takeHeldSQL = `
+UPDATE card_stocks
+SET status = ?, order_id = ?, sold_at = now(),
+    held_by_request = '', hold_expires_at = NULL, updated_at = now()
+WHERE held_by_request = ? AND status = ?
+RETURNING id, goods_id, code, status, order_id, sold_at, batch_no, remark, cost_price, created_at, updated_at`
+
+// SweepExpiredHolds 把过期未支付的预占退回可售。
+//
+// 由定时任务周期调用。不做这一步，买家点了「去支付」然后关掉页面，
+// 那张卡密会被锁到天荒地老 —— 池子里显示有货、实际卖不出去。
+func (s *CardService) SweepExpiredHolds(ctx context.Context) (int64, error) {
+	res := s.db.WithContext(ctx).Model(&models.CardStock{}).
+		Where("status = ? AND hold_expires_at IS NOT NULL AND hold_expires_at < ?",
+			models.CardStatusHeld, time.Now()).
+		Updates(map[string]any{
+			"status":          models.CardStatusAvailable,
+			"held_by_request": "",
+			"hold_expires_at": nil,
+			"updated_at":      time.Now(),
+		})
+	if res.Error != nil {
+		return 0, res.Error
+	}
+	if res.RowsAffected > 0 {
+		slog.Info("已释放过期的卡密预占", "released", res.RowsAffected)
+	}
+	return res.RowsAffected, nil
+}
+
+// CountByHold 某个支付意图当前预占了几张卡密。
+//
+// 下单时用它把「我自己占的货」加回可售库存，否则会出现
+// 「我占的那张把我自己挡在门外」的假缺货。
+func (s *CardService) CountByHold(ctx context.Context, requestID string) (int64, error) {
+	requestID = strings.TrimSpace(requestID)
+	if requestID == "" {
+		return 0, nil
+	}
+	var n int64
+	err := s.db.WithContext(ctx).Model(&models.CardStock{}).
+		Where("held_by_request = ? AND status = ?", requestID, models.CardStatusHeld).
+		Count(&n).Error
+	return n, err
+}
+
+// CountHeld 某商品当前被预占的张数（诊断用）。
+func (s *CardService) CountHeld(ctx context.Context, goodsID uint) (int64, error) {
+	var n int64
+	err := s.db.WithContext(ctx).Model(&models.CardStock{}).
+		Where("goods_id = ? AND status = ?", goodsID, models.CardStatusHeld).
+		Count(&n).Error
+	return n, err
+}
+
 // TakeOne 原子取一条可售卡密并标记为已售。
 //
 // 这是整套「自建商品」的核心，必须做到两件事：
@@ -455,8 +648,9 @@ func (s *CardService) CountAvailable(ctx context.Context, goodsID uint) (int64, 
 // VoidByOrder 把某订单占用的卡密整批「作废」（不是退回池子）。
 //
 // 和 ReleaseByOrder 的区别是语义，不是实现细节：
-//   ReleaseByOrder —— 卡密还能卖，退回可售状态（订单没发出去 / 撤销且未暴露）
-//   VoidByOrder    —— 卡密不能再卖，标记为已作废并写原因（已暴露 / 卡密有问题）
+//
+//	ReleaseByOrder —— 卡密还能卖，退回可售状态（订单没发出去 / 撤销且未暴露）
+//	VoidByOrder    —— 卡密不能再卖，标记为已作废并写原因（已暴露 / 卡密有问题）
 //
 // 撤销订单时「作废不退回」走的就是这里。卡密留在库里而不是删掉，
 // 是为了对账时能查到「这张卡密曾经发给过谁、为什么作废」。

@@ -297,6 +297,16 @@ type PaymentOrder struct {
 	AutoOrderError string `gorm:"size:512" json:"auto_order_error,omitempty"`
 	// AutoOrderAt 最近一次尝试自动下单的时间
 	AutoOrderAt *time.Time `json:"auto_order_at,omitempty"`
+	// AutoOrderClaimAt 自动发货的「抢占时间」，用于单飞（single-flight）。
+	//
+	// 为什么必须有：dispatchPaidOrder 会被多个入口并发调用 ——
+	// 易支付的重复回调、买家付款后每 5 秒一次的轮询（走到主动查单），
+	// 以及这两者同时到达。没有互斥时同一个幂等键会被并发执行两遍，
+	// 后一路必然撞上「余额已被前一路冻结」而失败，却把失败原因写进
+	// auto_order_error，买家看到的就是「平台备货账户余额不足」这种假故障。
+	AutoOrderClaimAt *time.Time `gorm:"index" json:"auto_order_claim_at,omitempty"`
+	// AutoOrderAttempts 自动发货已尝试的次数（仅在可重试错误时累加）
+	AutoOrderAttempts int `gorm:"not null;default:0" json:"auto_order_attempts,omitempty"`
 
 	Remark    string     `gorm:"size:255" json:"remark"`
 	ExpiresAt time.Time  `gorm:"not null;index" json:"expires_at"`

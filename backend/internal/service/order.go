@@ -30,6 +30,13 @@ type CreateOrderInput struct {
 	Remark    string
 	UserID    *uint
 	TTLHours  int // 0 表示用全局默认
+	// HoldRequestID 创建支付单时预占卡密所用的幂等键（"先占后拿"）。
+	//
+	// 非空表示「这个买家的卡密在付款前就已经占好了」：发卡时优先把
+	// 预占的这几张直接转成 sold，而不是重新去池子里抢。
+	// 这样匿名买家付款成功后不会再被别的买家抢走最后一张。
+	// 空串表示没有预占（余额直付、后台代客下单等即时链路），走原逻辑。
+	HoldRequestID string
 }
 
 // OrderService 是采购编排的核心。
@@ -232,6 +239,14 @@ func (s *OrderService) createHybrid(
 	poolAvail, err := s.cards.CountAvailable(ctx, goods.ID)
 	if err != nil {
 		return nil, fmt.Errorf("查询卡密池库存失败: %w", err)
+	}
+	// 把自己的预占算回来：预占的卡密不在 CountAvailable 里（别人不该买），
+	// 但对这笔订单自己算数。不补这一步，池子刚好够的单会因为
+	// 「池子看起来空了」而白白改走上游，多花一笔采购成本。
+	if in.HoldRequestID != "" {
+		if held, herr := s.cards.CountByHold(ctx, in.HoldRequestID); herr == nil {
+			poolAvail += held
+		}
 	}
 	plan := planHybrid(goods.LocalStockFirst, poolAvail >= int64(quantity))
 
@@ -627,9 +642,26 @@ func (s *OrderService) deliverFromPool(
 ) (*models.Order, error) {
 	now := time.Now()
 
-	// ---- 原子取卡密（按数量逐张取） ----
+	// ---- 取卡密：先把这笔支付预占好的拿过来，不够再用 TakeOne 补 ----
+	//
+	// 顺序很关键：预占是按支付意图锁死的（held_by_request = 支付的 request_id），
+	// 只有这笔支付能把它转成 sold。先吃预占，就等于把「付款成功」和
+	// 「卡密到手」之间那个可被别人抢走的窗口彻底关掉。
 	taken := make([]models.CardStock, 0, quantity)
-	for i := 0; i < quantity; i++ {
+	if in.HoldRequestID != "" {
+		held, herr := s.cards.TakeHeld(ctx, in.HoldRequestID, order.ID)
+		if herr != nil {
+			// 预占读取失败不该阻断发货：池子里如果还有现货，TakeOne 仍能补上
+			slog.Warn("读取卡密预占失败，回落到直接从池子取",
+				"order_no", order.OrderNo, "request_id", in.HoldRequestID, "error", herr.Error())
+		} else if len(held) > 0 {
+			taken = append(taken, held...)
+			slog.Info("使用预占卡密发货",
+				"order_no", order.OrderNo, "count", len(held), "request_id", in.HoldRequestID)
+		}
+	}
+
+	for i := len(taken); i < quantity; i++ {
 		card, err := s.cards.TakeOne(ctx, goods.ID, order.ID, nil)
 		if err != nil {
 			// 没卡密了：这张订单标失败并说明原因，不留在 purchasing 上悬着。

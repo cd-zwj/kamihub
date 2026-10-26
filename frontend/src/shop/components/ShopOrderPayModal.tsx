@@ -360,9 +360,16 @@ export default function ShopOrderPayModal({
             showIcon
             message={`应付金额 ¥${formatMoney(paying.amount)}`}
             description={
-              paying.pay_url
-                ? '若支付页面没有自动打开，请点下方按钮前往。付款完成后会自动发货，无需手动刷新。'
-                : '请在新打开的支付页面完成付款。若未自动打开，请检查浏览器是否拦截了弹窗。'
+              <>
+                {paying.pay_url
+                  ? '若支付页面没有自动打开，请点下方按钮前往。付款完成后会自动发货，无需手动刷新。'
+                  : '请在新打开的支付页面完成付款。若未自动打开，请检查浏览器是否拦截了弹窗。'}
+                <br />
+                <span style={{ color: '#8c8c8c' }}>
+                  支付通道为避免同金额订单冲突，可能把实付金额微调几分到几角；
+                  多付的部分会原样退到你的站内余额，不影响发货。
+                </span>
+              </>
             }
           />
           {paying.pay_url && (
@@ -413,6 +420,10 @@ export default function ShopOrderPayModal({
             </Space>
             <Text type="secondary">
               {quantity} 件 · 应付 <Text strong style={{ color: '#f5222d' }}>¥{formatMoney(estimateTotal)}</Text>
+            <br />
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              实际扣款以「立即支付」后的应付金额为准；通道微调多付的部分会自动退回余额。
+            </Text>
             </Text>
             <Text type="secondary" style={{ fontSize: 12 }}>
               实际扣款金额以商品当前售价为准（服务端计算），下单前不会多扣。

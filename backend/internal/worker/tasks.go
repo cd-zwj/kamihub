@@ -1,4 +1,4 @@
-﻿package worker
+package worker
 
 import (
 	"context"
@@ -27,6 +27,10 @@ type Services struct {
 	Reconcile *service.ReconcileService
 	// Agent 销售档位重算（迭代 3）。为 nil 表示未启用阶梯专价。
 	Agent *service.AgentService
+	// Cards 卡密池。用来清理过期的库存预占 —— 买家点了「去支付」
+	// 又关掉页面时，那几张卡会一直以 held 状态锁着，不清理就等于
+	// 「池子里有货但永远卖不出去」。为 nil 时跳过这一步。
+	Cards *service.CardService
 }
 
 // BuildTasks 构造全部定时任务。
@@ -128,6 +132,16 @@ func stockSyncTask(db *gorm.DB, cfg *config.Config, svc Services, n *notify.Noti
 
 		var res Result
 		var okCount, failCount, outOfStock int
+
+		// 先清理过期的卡密预占：这一步必须在同步库存之前，
+		// 否则池子里「看起来有货」的那几张其实还锁在别人的待支付单上。
+		if svc.Cards != nil {
+			if released, rerr := svc.Cards.SweepExpiredHolds(ctx); rerr != nil {
+				slog.Warn("清理过期卡密预占失败", "error", rerr.Error())
+			} else if released > 0 {
+				slog.Info("清理过期卡密预占", "released", released)
+			}
+		}
 
 		for i := range supplies {
 			sup := &supplies[i]

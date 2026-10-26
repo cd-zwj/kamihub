@@ -8,6 +8,8 @@ interface Props {
   stockExact?: boolean;
   /** 上游库存缓存的最旧同步时间 */
   stockUpdatedAt?: string | null;
+  /** 上游库存缓存已过期：数字不可信，一律显示「待确认」 */
+  stockStale?: boolean;
 }
 
 /**
@@ -22,11 +24,29 @@ interface Props {
  * 后者如果把 0 显示成「缺货」，会把明明能卖的商品挡在门外；
  * 所以这里对估算库存只展示数字与新鲜度，把最终判断留给下单时的实时询价。
  */
-export default function StockTag({ stock, stockExact, stockUpdatedAt }: Props) {
+export default function StockTag({ stock, stockExact, stockUpdatedAt, stockStale }: Props) {
   // 精确库存：0 就是缺货
   if (stockExact) {
     if (stock <= 0) return <Tag color="default">缺货</Tag>;
     return <Tag color="green">库存 {stock}</Tag>;
+  }
+
+  // 上游缓存过期：数字是旧值，宁可说「待确认」也不假报有货。
+  // 这条专治「上游都没货了，商城还显示有货」的客诉。
+  if (stockStale) {
+    return (
+      <Tooltip
+        title={
+          '库存数据已过期' +
+          (stockUpdatedAt ? `（最近一次成功同步：${agoText(stockUpdatedAt)}）` : '') +
+          '，以实际下单结果为准。下单时会实时确认，没货会立即提示，不会扣款。'
+        }
+      >
+        <Tag color="default" style={{ cursor: 'help' }}>
+          库存待确认
+        </Tag>
+      </Tooltip>
+    );
   }
 
   // 估算库存：上游报「不限/未知」
@@ -80,6 +100,9 @@ export default function StockTag({ stock, stockExact, stockUpdatedAt }: Props) {
  * 只有精确库存为 0 才算售罄。估算库存为 0 时仍然允许下单 ——
  * 缓存过期导致把能卖的商品挡在门外，比让买家下单后自动退款更亏。
  */
-export function isSoldOut(stock: number, stockExact?: boolean): boolean {
+export function isSoldOut(stock: number, stockExact?: boolean, stockStale?: boolean): boolean {
+  // 缓存过期时 stock 可能是「0 但上游其实有货」，也可能是「N 但上游早没货」，
+  // 两种情况都不该在页面上判死：让买家点进去，由下单时的实时询价裁决。
+  if (stockStale && !stockExact) return false;
   return Boolean(stockExact) && stock <= 0;
 }

@@ -76,21 +76,28 @@ const guestPasswordPlaceholder = "!guest-no-login!"
 // EnsureGuest 找到或创建匿名买家，并校验安全密码。
 //
 // 语义：
-//   - 邮箱不存在 → 创建匿名买家（首次下单即注册，密码用本次传入的 pin）
-//   - 邮箱存在且是匿名买家 → 必须密码正确，否则返回 ErrGuestAuthFailed
-//   - 邮箱存在但是普通注册买家 → 返回 ErrGuestAuthFailed（不允许匿名接管已有账号）
+//   - 该邮箱下已有匿名买家 → 必须密码正确，否则返回 ErrGuestAuthFailed
+//   - 该邮箱下没有匿名买家、但属于正式注册账号 → 返回 ErrGuestAuthFailed
+//     （不允许匿名通道接管已有账号的订单）
+//   - 都没有 → 创建匿名买家（首次下单即注册，密码用本次传入的 pin）
+//
+// 关键：查询必须先按「匿名买家」这个口径过滤，再做「是否正式账号」的判断。
+//
+// 原来是一条 Where("email = ?").Order("id ASC").First()，只看最早的那行：
+// buyers.email 上没有唯一索引，同一个邮箱可以同时存在「正式账号（早）」
+// 和「匿名买家（晚）」。于是先注册过、后来改用匿名通道下单的老客户，
+// 每一次都会被判成 ErrGuestAuthFailed —— 表现为「明明是第一次匿名买，
+// 却说过邮箱或安全密码不正确」，而且换成正确密码也永远进不去。
 func (s *GuestService) EnsureGuest(ctx context.Context, email, pin, ip string) (*models.Buyer, error) {
 	e := NormalizeGuestEmail(email)
 	pin = strings.TrimSpace(pin)
 
 	var b models.Buyer
-	err := s.db.WithContext(ctx).Where("email = ?", e).Order("id ASC").First(&b).Error
+	err := s.db.WithContext(ctx).
+		Where("email = ? AND is_guest = ?", e, true).
+		Order("id ASC").First(&b).Error
 	switch {
 	case err == nil:
-		if !b.IsGuest {
-			// 已有正式账号：匿名通道不得触碰，避免越权访问他人订单
-			return nil, ErrGuestAuthFailed
-		}
 		if !b.IsEnabled() {
 			return nil, ErrGuestDisabled
 		}
@@ -100,6 +107,18 @@ func (s *GuestService) EnsureGuest(ctx context.Context, email, pin, ip string) (
 		return &b, nil
 	case !errors.Is(err, gorm.ErrRecordNotFound):
 		return nil, err
+	}
+
+	// 没有匿名买家：若这个邮箱属于正式注册账号，仍然拒绝匿名接管
+	var formal int64
+	if err := s.db.WithContext(ctx).Model(&models.Buyer{}).
+		Where("email = ? AND is_guest = ?", e, false).
+		Count(&formal).Error; err != nil {
+		return nil, err
+	}
+	if formal > 0 {
+		// 对外仍是统一的凭据错误，不暴露「这个邮箱注册过」
+		return nil, ErrGuestAuthFailed
 	}
 
 	// 首次出现：创建匿名买家

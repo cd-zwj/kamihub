@@ -32,34 +32,34 @@ var (
 	ErrPaymentTooMany     = errors.New("有待支付的订单，请先完成或等待超时")
 )
 
-// maxAmountDrift 上游实际支付金额与本地记录金额之间允许的最大正偏差（元）。
+// amountDriftWarn 多付超过这个额度时记一条告警日志（元）。
 //
-// 为什么需要容忍（2026-10-23 实测 521cd）：
-// 这类易支付网关为了避免「同一金额的多笔未支付订单」在回调时分不清是谁付的，
-// 会在下单时把重复金额**自动 +0.01**。实测连下 3 单同价商品：
-//
-//	本地 85.00 → 上游 85.01 / 85.02 / 85.03
-//
-// 于是买家支付宝里实际付的是 85.02，而我们记的是 85.00。
-// 原来用严格相等校验，这种单会被直接拒掉 —— 买家付了钱却不到账、不发货，
-// 表现出来就是「付完款没反应 / 匿名下单有问题」。
-//
-// 容忍度只给 0.10 元：覆盖网关的几分钱微调，又不给「少付一大截」留口子。
-// 判定规则见 amountAcceptable：**多付 ≤0.10 放行，少付一律拒绝**。
-const maxAmountDrift = 0.10
+// 只是「值得看一眼」，不是拒单线 —— 判单规则见 amountAcceptable。
+const amountDriftWarn = 0.10
 
 // amountAcceptable 上游金额是否可以接受并据以入账。
 //
-//   - remote < local（少付）：拒绝。否则「付 0.01 元拿 100 元货」就成立了。
-//   - local ≤ remote ≤ local+0.10（多付一点点）：放行，按 local 入账。
-//     多出来的部分是网关的金额去重微调，不该让买家为它拿不到货。
-//   - remote 超出 local+0.10：拒绝并留痕，交给人工核对（可能是配错价）。
+// 规则只有一条：**少付拒绝，多付放行**。
+//
+// 为什么不再设「多付上限」（旧实现是 +0.10 以内才放行）：
+//
+//  1. 网关会按「同金额未支付单」自动抬价。实测 85.00 → 85.01/85.02/85.03，
+//     而这种累加没有硬上限，单量一多就能到 +0.10 以上（线上已经出现过
+//     10.00 → 10.10，旧逻辑在边界上勉强放行，再多一档就直接拒单）。
+//  2. 更致命的是「页面显示金额 ≠ 成交金额」：报价曾经固定按零售价，
+//     而实际扣款走买家档位专价，于是页面写 10 元、服务端记 9 元，
+//     买家在收银台又被网关抬高到 10.1 —— 差 1.10，旧逻辑直接判死，
+//     回调回 fail，上游一直重试，买家付了钱却永远不到账。
+//
+// 多付对我们是零风险：钱多收了，货照发，差额原样留在买家余额里
+// （见 HandleNotify / settlePaid：入账用的是**买家实付金额**，不是本地金额）。
+// 少付才是风险，一律拒绝。
 func amountAcceptable(local, remote decimal.Decimal) bool {
-	diff := remote.Sub(local)
-	if diff.IsNegative() {
+	if local.IsNegative() || remote.IsNegative() {
 		return false
 	}
-	return diff.LessThanOrEqual(decimal.NewFromFloat(maxAmountDrift))
+	// remote >= local 才可能入账；相等也走这里（diff=0）
+	return !remote.Sub(local).IsNegative()
 }
 
 // PaymentService 处理第三方支付（易支付）的充值。
@@ -78,6 +78,16 @@ type PaymentService struct {
 	// shopOrders 用于「直付购卡」：算权威价格 + 付款成功后自动下单发货。
 	// 依赖方向只有 PaymentService → ShopOrderService，不会成环。
 	shopOrders *ShopOrderService
+	// cards 卡密池。创建支付单时用它「先占后拿」：把这几张卡密先锁成
+	// 预占状态，付款成功后直接转 sold，付款超时/失败则退回可售。
+	// 为 nil 表示不预占（退化成老行为）。
+	cards *CardService
+}
+
+// WithCards 装配卡密池服务（先占后拿）。
+func (s *PaymentService) WithCards(c *CardService) *PaymentService {
+	s.cards = c
+	return s
 }
 
 func NewPaymentService(db *gorm.DB, cfg *config.Config, settings *SettingsService, wallet *WalletService, shopOrders *ShopOrderService) *PaymentService {
@@ -195,7 +205,11 @@ func (s *PaymentService) CreatePay(ctx context.Context, in CreatePayInput) (*Cre
 		if s.shopOrders == nil {
 			return nil, ErrPaymentDisabled
 		}
-		q, err := s.shopOrders.Quote(ctx, in.Intent.ListingID, in.Intent.Quantity)
+		// 报价必须带买家身份：代理/销售买家走档位专价。
+		// 以前这里用不带身份的 Quote（零售价），而真正扣款按下单时的档位价，
+		// 于是「页面显示 10 元、订单只扣 9 元」—— 买家在收银台又看到网关的
+		// 抬价（10.1），三方金额互不相同，回调必然对不上。
+		q, err := s.shopOrders.QuoteFor(ctx, in.Intent.ListingID, in.Intent.Quantity, in.BuyerID)
 		if err != nil {
 			return nil, err
 		}
@@ -276,7 +290,37 @@ func (s *PaymentService) CreatePay(ctx context.Context, in CreatePayInput) (*Cre
 		po.PurchaseRequestID = truncateStr("pay-auto:"+reqID, 128)
 		po.Remark = fmt.Sprintf("直付购卡 %s × %d", intentQuote.Title, intentQuote.Quantity)
 	}
+	// ---- 先占后拿：创建支付单就把卡密占住 ----
+	//
+	// 匿名购买是「先付款、后下单」：从点「去支付」到支付宝回调到账、
+	// 自动下单取卡，中间隔着几分钟。这段窗口里卡密一直是 available，
+	// 别的买家（尤其秒下的登录买家）会把它买走 —— 于是匿名买家付完钱
+	// 收到「商品暂时缺货」，钱退进余额，客诉就是这么来的。
+	//
+	// 这里在**创建支付单时**就把卡密锁成 held（CountAvailable 不再计入），
+	// 把窗口从「几分钟」压到「几毫秒」；付款成功后 TakeHeld 直接转 sold。
+	// 占不到就当场拒绝，绝不收钱。
+	//
+	// 落在 Create 之前：预占失败要能让整笔支付不成立，而不是先建单再失败。
+	if purpose == models.PaymentPurposeOrder && s.cards != nil && intentQuote.UsesCardPool() {
+		holdTTL := time.Duration(pay.OrderTTLMinutes)*time.Minute + 10*time.Minute
+		if _, herr := s.cards.ReserveForPayment(
+			ctx, intentQuote.GoodsID, intentQuote.Quantity, po.PurchaseRequestID, holdTTL,
+		); herr != nil {
+			if errors.Is(herr, ErrCardEmpty) {
+				// 对买家说人话：这是缺货，不是系统故障
+				return nil, ErrListingNoStock
+			}
+			return nil, fmt.Errorf("预占库存失败：%w", herr)
+		}
+		slog.Info("已为待支付订单预占卡密",
+			"buyer_id", in.BuyerID, "listing_id", intentQuote.ListingID,
+			"quantity", intentQuote.Quantity, "hold", po.PurchaseRequestID)
+	}
+
 	if err := s.db.WithContext(ctx).Create(&po).Error; err != nil {
+		// 支付单没落库，预占必须立刻退回，否则这几张卡被白锁住
+		s.releaseHoldQuietly(ctx, po.PurchaseRequestID)
 		return nil, fmt.Errorf("创建支付单失败：%w", err)
 	}
 
@@ -318,6 +362,8 @@ func (s *PaymentService) CreatePay(ctx context.Context, in CreatePayInput) (*Cre
 			Where("id = ?", po.ID).
 			Update("status", models.PaymentStatusFailed).Error
 		slog.Error("向易支付下单失败", "trade_no", tradeNo, "error", err.Error())
+		// 支付根本没发起成功，预占的卡密必须立刻退回可售
+		s.releaseHoldQuietly(ctx, po.PurchaseRequestID)
 		return nil, err
 	}
 
@@ -440,24 +486,30 @@ func (s *PaymentService) HandleNotify(ctx context.Context, params map[string]str
 			return nil
 		}
 
-		// 金额核对。用 decimal 比较，避免浮点误差。
-		//
-		// 注意这里不是「严格相等」：网关会把重复金额自动 +0.01（见 maxAmountDrift），
-		// 严格相等会把这类正常付款直接拒掉。规则是「少付拒绝，多付 ≤0.10 放行」，
-		// 入账永远按本地金额 localAmount，多付的几分钱不进余额。
+		// 金额核对：少付拒绝，多付放行（见 amountAcceptable）。
 		localAmount := po.Amount
 		remoteAmount := decimal.NewFromFloat(paidAmount).Round(2)
 		if !amountAcceptable(localAmount, remoteAmount) {
-			slog.Error("支付回调金额不一致，拒绝入账",
+			slog.Error("支付回调金额低于应收，拒绝入账",
 				"trade_no", tradeNo,
 				"local", localAmount.String(), "remote", remoteAmount.String())
 			handled = false
 			reason = "金额不一致"
 			return nil
 		}
+		// 入账金额 = 买家实际付的钱，而不是本地应收金额。
+		//
+		// 这一点很关键：网关会为了「同金额订单去重」把实付金额往上抬
+		// （10.00 → 10.10 这种），页面显示的价钱和收银台的价钱因此对不上。
+		// 以前按本地金额入账，多出来的钱既没进买家余额、也没进我们账上，
+		// 对账永远差一笔；现在实付多少就入多少，多付的部分留在买家余额里，
+		// 买家不吃亏，账面也不会缺。
+		credit := remoteAmount
 		if !localAmount.Equal(remoteAmount) {
-			slog.Warn("上游金额与本地存在小额偏差，按本地金额入账",
-				"trade_no", tradeNo, "local", localAmount.String(), "remote", remoteAmount.String())
+			slog.Warn("上游实付金额与本地应收不一致，按实付金额入账",
+				"trade_no", tradeNo,
+				"local", localAmount.String(), "remote", remoteAmount.String(),
+				"diff", remoteAmount.Sub(localAmount).String())
 		}
 
 		// ---- 入账 ----
@@ -467,13 +519,13 @@ func (s *PaymentService) HandleNotify(ctx context.Context, params map[string]str
 			return err
 		}
 
-		balanceAfter := buyer.Balance.Add(localAmount)
+		balanceAfter := buyer.Balance.Add(credit)
 
 		// 幂等键用支付单号，与「充值码」「人工调账」区分开
 		wtx := models.WalletTransaction{
 			BuyerID:      po.BuyerID,
 			Type:         models.WalletTypeOnlinePay,
-			Amount:       localAmount,
+			Amount:       credit,
 			BalanceAfter: balanceAfter,
 			Status:       models.WalletStatusSettled,
 			RequestID:    "pay:" + tradeNo,
@@ -507,7 +559,8 @@ func (s *PaymentService) HandleNotify(ctx context.Context, params map[string]str
 		handled = true
 		slog.Info("支付成功入账",
 			"trade_no", tradeNo, "buyer_id", po.BuyerID,
-			"amount", localAmount.String(), "balance", balanceAfter.String())
+			"credit", credit.String(), "local", localAmount.String(),
+			"balance", balanceAfter.String())
 		return nil
 	})
 
@@ -621,11 +674,15 @@ func (s *PaymentService) settlePaid(ctx context.Context, po *models.PaymentOrder
 
 		remote := decimal.NewFromFloat(paidAmount).Round(2)
 		if !amountAcceptable(cur.Amount, remote) {
-			return fmt.Errorf("查单金额不一致：本地 %s，上游 %s", cur.Amount.String(), remote.String())
+			return fmt.Errorf("查单金额低于应收：本地 %s，上游 %s", cur.Amount.String(), remote.String())
 		}
+		// 与 HandleNotify 一致：按买家实付金额入账，多付的留在余额里
+		credit := remote
 		if !cur.Amount.Equal(remote) {
-			slog.Warn("主动查单金额与本地存在小额偏差，按本地金额入账",
-				"trade_no", cur.TradeNo, "local", cur.Amount.String(), "remote", remote.String())
+			slog.Warn("主动查单实付金额与本地应收不一致，按实付金额入账",
+				"trade_no", cur.TradeNo,
+				"local", cur.Amount.String(), "remote", remote.String(),
+				"diff", remote.Sub(cur.Amount).String())
 		}
 
 		var buyer models.Buyer
@@ -633,12 +690,12 @@ func (s *PaymentService) settlePaid(ctx context.Context, po *models.PaymentOrder
 			First(&buyer, cur.BuyerID).Error; err != nil {
 			return err
 		}
-		balanceAfter := buyer.Balance.Add(cur.Amount)
+		balanceAfter := buyer.Balance.Add(credit)
 
 		wtx := models.WalletTransaction{
 			BuyerID:      cur.BuyerID,
 			Type:         models.WalletTypeOnlinePay,
-			Amount:       cur.Amount,
+			Amount:       credit,
 			BalanceAfter: balanceAfter,
 			Status:       models.WalletStatusSettled,
 			RequestID:    "pay:" + cur.TradeNo,
@@ -731,12 +788,25 @@ func autoOrderFailHint(raw string) string {
 		return "购买数量超过该商品的单次上限，请调整数量后重新下单。" + tail
 	case strings.Contains(s, "最少购买"), strings.Contains(s, "起购"):
 		return "购买数量未达该商品的起购数量，请调整后重新下单。" + tail
-	case strings.Contains(s, "售罄"), strings.Contains(s, "无库存"), strings.Contains(s, "库存不足"):
+	case strings.Contains(s, "售罄"), strings.Contains(s, "无库存"), strings.Contains(s, "库存不足"), strings.Contains(s, "缺货"):
 		return "商品暂时缺货，本次没有发货。" + tail
 	case strings.Contains(s, "下架"), strings.Contains(s, "不存在"):
 		return "商品已下架或暂不可购买。" + tail
-	case strings.Contains(s, "余额不足"):
+	// ---- 两种「余额不足」必须分开 ----
+	//
+	// 「平台余额不足」是上游备货账户（平台侧）没钱；
+	// 而 wallet.FreezeForPurchase 返回的 ErrInsufficientFunds 是**买家自己的钱包**。
+	// 以前两者共用一条 余额不足 分支，于是并发抢占导致的买家侧冻结失败
+	// 被翻译成「平台备货账户余额不足，我们正在处理」—— 运营去查上游明明有钱、
+	// 商品也明明有货，客诉却指向余额，两边都被误导。
+	case strings.Contains(s, "平台余额不足"), strings.Contains(s, "备货"),
+		strings.Contains(s, "BALANCE_NOT_ENOUGH"):
 		return "平台备货账户余额不足，我们正在处理。" + tail
+	case strings.Contains(s, "余额不足"):
+		// 买家钱包侧：这笔下单没有真正扣款成功，钱一直在余额里
+		return "本次下单未能完成结算，钱仍在你的站内余额里，请稍后重新下单。"
+	case strings.Contains(s, "正在处理中"), strings.Contains(s, "处理中"):
+		return "订单正在处理，请稍后到「订单查询」刷新查看结果。"
 	}
 	return autoOrderFailedMessage
 }
@@ -766,20 +836,107 @@ func firstIntIn(s string) int {
 	return 0
 }
 
+// 自动发货的重试与单飞参数。
+const (
+	// autoOrderMaxAttempts 一次「付款后自动发货」最多尝试几次。
+	//
+	// 为什么要重试：这笔自动下单会被多个入口并发触发（易支付重复回调、
+	// 买家付款后的轮询、两者同时到达）。并发时后到的那一路会撞上
+	// 「余额已被前一路冻结」（ErrInsufficientFunds）或「该请求正在处理中」，
+	// 这些都不是真实失败 —— 钱在余额里、货也还在。
+	// 直接当成失败写进 auto_order_error，买家就会看到
+	// 「平台备货账户余额不足」「商品暂时缺货」，而订单其实正在生成。
+	autoOrderMaxAttempts = 3
+	// autoOrderRetryGap 两次尝试之间的间隔。钱包的冻结占用通常在秒级释放。
+	autoOrderRetryGap = 2 * time.Second
+	// autoOrderClaimTTL 抢占锁的存活时间。超过这个时间认为抢锁的那次执行
+	// 已经挂了（进程崩溃 / 请求被中断），允许后来者接手；
+	// 否则一次崩溃会让这笔支付永远发不出去。
+	autoOrderClaimTTL = 10 * time.Minute
+)
+
+// claimAutoOrder 抢占「这笔支付的自动发货由我来跑」。
+//
+// 这是资金与发货之间最容易被忽略的一道闸。dispatchPaidOrder 是**多入口**的：
+//
+//	HandleNotify（易支付回调，且上游会重复推送）
+//	settlePaid（买家轮询触发的主动查单）
+//
+// 两者会在同一笔支付上并发到达。这一层没有互斥时，同一个
+// PurchaseRequestID 会被并发执行两次：先到者成功冻结余额并开始采购，
+// 后到者读到「余额已不够」或「流水已存在但订单还没落库」，于是失败。
+// 失败分支又会 markAutoOrder 写 auto_order_error —— 买家看到的就是
+// 「有货但说余额不足」「商品暂时缺货」这种假故障，运营查上游一切正常。
+//
+// 这里用「条件 UPDATE 抢锁」而不是 Redis 锁：
+// 数据库是权威、不依赖外部组件，且条件更新本身就是原子的。
+func (s *PaymentService) claimAutoOrder(ctx context.Context, po *models.PaymentOrder) bool {
+	cutoff := time.Now().Add(-autoOrderClaimTTL)
+	res := s.db.WithContext(ctx).Model(&models.PaymentOrder{}).
+		Where("id = ? AND order_id IS NULL", po.ID).
+		// 历史行的 auto_order_error 可能是 NULL（列没有 NOT NULL 约束），
+		// 只判 = '' 会把它们整批漏掉，那笔支付就再也发不出货。
+		Where("(auto_order_error IS NULL OR auto_order_error = '')").
+		Where("auto_order_claim_at IS NULL OR auto_order_claim_at < ?", cutoff).
+		UpdateColumn("auto_order_claim_at", time.Now())
+	if res.Error != nil {
+		slog.Error("抢占自动发货失败", "payment_id", po.ID, "error", res.Error.Error())
+		return false
+	}
+	return res.RowsAffected > 0
+}
+
+// releaseAutoOrderClaim 释放抢占锁（正常结束或失败后都要放）。
+//
+// 失败时也必须放：auto_order_error 才是「不再重试」的闸门，
+// 锁只负责「同一时刻只有一个人在跑」。锁不放会让对账/人工重试全部卡住。
+func (s *PaymentService) releaseAutoOrderClaim(ctx context.Context, paymentID uint) {
+	if err := s.db.WithContext(ctx).Model(&models.PaymentOrder{}).
+		Where("id = ?", paymentID).
+		Updates(map[string]any{"auto_order_claim_at": nil}).Error; err != nil {
+		slog.Warn("释放自动发货抢占锁失败", "payment_id", paymentID, "error", err.Error())
+	}
+}
+
+// autoOrderRetryable 判断这次自动发货失败是否值得立刻再试一次。
+//
+// 只对「还没落订单行」的错误重试，避免在买家订单列表里留一串
+// 同一笔支付的失败订单（那会让买家以为买了好几次都失败）。
+//   - 余额占用冲突 / 同一 request_id 正在处理中：并发导致，闪一下就好
+//   - 暂时缺货 / 库存不足：并发抢走最后一张，退款回池后立刻又有货
+//   - 限流 / 超时：临时故障
+func autoOrderRetryable(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, ErrInsufficientFunds) {
+		return true
+	}
+	s := err.Error()
+	for _, k := range []string{
+		"正在处理中",
+		"暂时缺货", "库存不足", "无库存", "售罄",
+		"限流", "频率超限", "RATE_LIMITED", "超时", "timeout", "连接",
+	} {
+		if strings.Contains(s, k) {
+			return true
+		}
+	}
+	return false
+}
+
 // dispatchPaidOrder 付款成功后自动下单发货。
 //
 // 触发时机：支付单被确认收款，且用途是「直付购卡」。
 //
 // 幂等设计是这一段最需要小心的地方：
 //   - 易支付的异步回调和我们自己的「主动查单」会并发到达，
-//     所以本方法一定会在同一笔支付上被调用多次。
-//   - OrderID 非空 → 已经发过货，直接返回，绝不重复下单。
-//   - AutoOrderError 非空 → 上次试过且失败了，钱已安全躺在余额里，
-//     这里不再自动重试（否则上游挂掉时会被反复捶），
-//     买家点「重新下单」时走正常下单流程即可。
-//   - 真正下单用的 PurchaseRequestID 是稳定的，即使上面两道闸都被撞穿，
-//     钱包流水的 request_id 唯一索引 + 订单的 request_id 唯一索引
-//     也会挡住重复扣款和重复采购。
+//     所以本方法一定会在同一笔支付上被调用多次 → 用 claimAutoOrder 单飞
+//   - OrderID 非空 → 已经发过货，直接返回，绝不重复下单
+//   - AutoOrderError 非空 → 上次确实失败了，钱已安全躺在余额里，
+//     不再自动重试（否则上游挂掉时会被反复捶）
+//   - 真正下单用的 PurchaseRequestID 是稳定的，钱包流水与订单的
+//     request_id 唯一索引是最后一道兜底
 func (s *PaymentService) dispatchPaidOrder(ctx context.Context, paymentID uint) {
 	if s.shopOrders == nil {
 		return
@@ -802,47 +959,114 @@ func (s *PaymentService) dispatchPaidOrder(ctx context.Context, paymentID uint) 
 		return
 	}
 
+	// 单飞：抢不到锁说明另一路正在跑（或刚跑完），让给它，绝不重复下单。
+	if !s.claimAutoOrder(ctx, &po) {
+		slog.Info("自动发货已由其它入口在处理，本次跳过", "trade_no", po.TradeNo)
+		return
+	}
+	defer s.releaseAutoOrderClaim(ctx, po.ID)
+
 	qty := po.Quantity
 	if qty <= 0 {
 		qty = 1
 	}
-	reqID := strings.TrimSpace(po.PurchaseRequestID)
-	if reqID == "" {
-		reqID = "pay-auto:" + po.TradeNo
+	baseReqID := strings.TrimSpace(po.PurchaseRequestID)
+	if baseReqID == "" {
+		baseReqID = "pay-auto:" + po.TradeNo
 	}
 
-	res, err := s.shopOrders.Purchase(ctx, ShopPurchaseInput{
-		BuyerID:   po.BuyerID,
-		ListingID: *po.ListingID,
-		Quantity:  qty,
-		RequestID: reqID,
-	})
-	if err != nil {
-		slog.Error("直付购卡自动发货失败，金额已留在余额",
-			"trade_no", po.TradeNo, "buyer_id", po.BuyerID,
-			"listing_id", *po.ListingID, "amount", po.Amount.String(), "error", err.Error())
-		s.markAutoOrder(ctx, po.ID, nil, err.Error())
+	var lastErr error
+	for attempt := 1; attempt <= autoOrderMaxAttempts; attempt++ {
+		// 第一次沿用支付单上的稳定幂等键；重试必须换一个键，
+		// 否则会命中上一次「已冻结又已退款」的流水，永远重放失败。
+		reqID := baseReqID
+		if attempt > 1 {
+			reqID = fmt.Sprintf("%s-r%d", baseReqID, attempt)
+		}
+
+		res, err := s.shopOrders.Purchase(ctx, ShopPurchaseInput{
+			BuyerID:   po.BuyerID,
+			ListingID: *po.ListingID,
+			Quantity:  qty,
+			RequestID: reqID,
+			// 预占键与重试无关：那张卡从一开始就是这笔支付的，
+			// 换请求键重试仍然应该吃同一个预占。
+			HoldRequestID: baseReqID,
+		})
+		if err == nil {
+			slog.Info("直付购卡自动发货成功",
+				"trade_no", po.TradeNo, "order_no", res.OrderNo,
+				"buyer_id", po.BuyerID, "attempt", attempt)
+			s.markAutoOrder(ctx, po.ID, &res.OrderID, "")
+			return
+		}
+		lastErr = err
+
+		// 并发胜出者可能已经把这笔发掉了：先确认，绝不把成功覆盖成失败
+		var cur models.PaymentOrder
+		if e := s.db.WithContext(ctx).First(&cur, po.ID).Error; e == nil && cur.OrderID != nil {
+			slog.Info("自动发货已由其它入口完成，忽略本次失败",
+				"trade_no", po.TradeNo, "error", err.Error())
+			return
+		}
+
+		if attempt >= autoOrderMaxAttempts || !autoOrderRetryable(err) {
+			break
+		}
+		slog.Warn("自动发货失败，稍后重试",
+			"trade_no", po.TradeNo, "attempt", attempt, "error", err.Error())
+		if uerr := s.db.WithContext(ctx).Model(&models.PaymentOrder{}).
+			Where("id = ? AND order_id IS NULL", po.ID).
+			UpdateColumn("auto_order_attempts", gorm.Expr("auto_order_attempts + 1")).Error; uerr != nil {
+			slog.Warn("累加自动发货尝试次数失败", "payment_id", po.ID, "error", uerr.Error())
+		}
+		time.Sleep(autoOrderRetryGap)
+	}
+
+	if lastErr == nil {
 		return
 	}
+	slog.Error("直付购卡自动发货失败，金额已留在余额",
+		"trade_no", po.TradeNo, "buyer_id", po.BuyerID,
+		"listing_id", *po.ListingID, "amount", po.Amount.String(),
+		"error", lastErr.Error())
+	s.markAutoOrder(ctx, po.ID, nil, lastErr.Error())
+}
 
-	slog.Info("直付购卡自动发货成功",
-		"trade_no", po.TradeNo, "order_no", res.OrderNo, "buyer_id", po.BuyerID)
-	s.markAutoOrder(ctx, po.ID, &res.OrderID, "")
+// releaseHoldQuietly 退回某支付意图预占的卡密（不阻断主流程）。
+func (s *PaymentService) releaseHoldQuietly(ctx context.Context, holdRequestID string) {
+	if s.cards == nil || strings.TrimSpace(holdRequestID) == "" {
+		return
+	}
+	n, err := s.cards.ReleaseHold(ctx, holdRequestID)
+	if err != nil {
+		slog.Error("释放卡密预占失败，需人工核对",
+			"request_id", holdRequestID, "error", err.Error())
+		return
+	}
+	if n > 0 {
+		slog.Info("已释放卡密预占", "request_id", holdRequestID, "count", n)
+	}
 }
 
 // markAutoOrder 记录自动发货的结果（成功记订单，失败记原因）。
+//
+// 失败分支带 order_id IS NULL 条件：并发下另一路可能已经成功，
+// 这时候一条迟到的失败信息绝不能把成功结果覆盖掉 ——
+// 那正是「付了钱、货也发了，页面却说发不出去」的来源。
 func (s *PaymentService) markAutoOrder(ctx context.Context, paymentID uint, orderID *uint, errMsg string) {
 	updates := map[string]any{
 		"auto_order_at": time.Now(),
 	}
+	q := s.db.WithContext(ctx).Model(&models.PaymentOrder{}).Where("id = ?", paymentID)
 	if orderID != nil {
 		updates["order_id"] = *orderID
 		updates["auto_order_error"] = ""
 	} else {
+		q = q.Where("order_id IS NULL")
 		updates["auto_order_error"] = truncateStr(errMsg, 512)
 	}
-	if err := s.db.WithContext(ctx).Model(&models.PaymentOrder{}).
-		Where("id = ?", paymentID).Updates(updates).Error; err != nil {
+	if err := q.Updates(updates).Error; err != nil {
 		slog.Error("记录自动发货结果失败", "payment_id", paymentID, "error", err.Error())
 	}
 }

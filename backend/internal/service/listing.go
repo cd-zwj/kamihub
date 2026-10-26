@@ -33,7 +33,29 @@ type ListingService struct {
 	cards *CardService
 	// pricing 档位专价。为 nil 时所有买家都按零售价（等价于关闭阶梯专价）。
 	pricing *PricingService
+	// stockRefresher 上游库存缓存过期时的实时刷新钩子。
+	//
+	// 由 main 装配成 GoodsService.RefreshStaleSupplyStock。用函数注入而不是
+	// 直接依赖 GoodsService，是为了不让 listing ← goods 形成环（goods 里已经
+	// 引用了 listings 的语义），也便于测试里替换成一个空实现。
+	stockRefresher func(ctx context.Context, goodsID uint, ttl time.Duration) error
 }
+
+// WithStockRefresher 装配「上游库存过期就实时询价」的钩子。
+func (s *ListingService) WithStockRefresher(fn func(ctx context.Context, goodsID uint, ttl time.Duration) error) *ListingService {
+	s.stockRefresher = fn
+	return s
+}
+
+// SupplyStockTTL 上游库存缓存的「新鲜期」。
+//
+// 超过这个时间没同步成功的货源，其库存数字不再被信任：
+//   - 商城展示：标记 stock_stale，页面显示「库存待确认」而不是假的「有货 N」
+//   - 下单/创建支付单：先实时询价一次，再决定卖不卖
+//
+// 为什么不设成定时任务的间隔（默认 2 分钟）：任务偶尔慢一轮不该让整个商城
+// 都变成「待确认」，但也不能让一个几小时前的数字继续骗买家。15 分钟是折中。
+const SupplyStockTTL = 15 * time.Minute
 
 func NewListingService(db *gorm.DB, cards *CardService) *ListingService {
 	return &ListingService{db: db, cards: cards}
@@ -84,6 +106,12 @@ type ShopListing struct {
 	StockUpdatedAt *time.Time `json:"stock_updated_at"`
 	// StockMode 1=自有卡密 2=上游代发 3=混合，供前端展示不同的文案
 	StockMode int `json:"stock_mode"`
+	// StockStale 上游库存缓存已经过期（超过 SupplyStockTTL 没同步成功）。
+	//
+	// 这时候 Stock 里的数字是**旧值**，上游可能早就没货了。
+	// 前端据此显示「库存待确认」，而不是继续挂一个「有货 N」骗买家下单 ——
+	// 「上游都没货了还显示有货」正是这次要修的客诉。
+	StockStale bool `json:"stock_stale"`
 
 	// Tiers 阶梯折扣档位（按 min_qty 升序）。
 	// 前端用它在商品页展示「10 个起 9 折」这类提示，
@@ -110,6 +138,12 @@ type supplyStock struct {
 	SupplyCount int64
 	// SyncedAt 最旧的一次库存同步时间
 	SyncedAt *time.Time
+	// FailedCount 自检明确失败（last_check_ok=false）的货源数。
+	//
+	// 线上踩过的坑：上游早就报「已售罄」，但 stock 列还留着上次成功的旧数字，
+	// 商城里就显示「库存 1」。只看 stock_synced_at 的新旧不够 ——
+	// 这个计数是「上游亲口说不能买」的直接证据，必须参与判定。
+	FailedCount int64
 }
 
 // supplyStockByGoods 批量汇总各商品启用中货源的库存缓存。
@@ -129,6 +163,7 @@ func (s *ListingService) supplyStockByGoods(ctx context.Context, goodsIDs []uint
 		GoodsID  uint
 		N        int64
 		UnknownN int64
+		FailedN  int64
 		Cnt      int64
 		SyncedAt *time.Time
 	}{}
@@ -136,6 +171,7 @@ func (s *ListingService) supplyStockByGoods(ctx context.Context, goodsIDs []uint
 		Select(`goods_id,
 		        COALESCE(SUM(CASE WHEN stock < 0 THEN 0 ELSE stock END), 0) AS n,
 		        COALESCE(SUM(CASE WHEN stock < 0 THEN 1 ELSE 0 END), 0) AS unknown_n,
+		        COALESCE(SUM(CASE WHEN last_check_ok IS FALSE THEN 1 ELSE 0 END), 0) AS failed_n,
 		        COUNT(*) AS cnt,
 		        MIN(stock_synced_at) AS synced_at`).
 		Where("goods_id IN ? AND enabled = ?", goodsIDs, true).
@@ -143,7 +179,7 @@ func (s *ListingService) supplyStockByGoods(ctx context.Context, goodsIDs []uint
 		return nil, err
 	}
 	for _, r := range rows {
-		ss := supplyStock{SupplyCount: r.Cnt, Stock: r.N}
+		ss := supplyStock{SupplyCount: r.Cnt, Stock: r.N, FailedCount: r.FailedN}
 		if r.UnknownN > 0 {
 			ss.Stock = -1
 		}
@@ -328,8 +364,21 @@ func (s *ListingService) toShopListings(ctx context.Context, rows []models.Listi
 			// 上游 / 混合：可售量 = 上游缓存（+ 混合模式下的池子真实张数）
 			item.Stock = ss.Stock
 			item.StockUpdatedAt = ss.SyncedAt
+			// 缓存多久没更新了？太久就标记为「不可信」。
+			//
+			// 这一条专门对付「上游都没货了，商城还显示有货」：
+			// 定时同步失败时会保留旧库存（避免一次抖动清成 0），
+			// 但旧库存不能当成事实继续展示，否则买家付完钱才发现没货。
+			if ss.SyncedAt == nil || time.Since(*ss.SyncedAt) > SupplyStockTTL || ss.FailedCount > 0 {
+				item.StockStale = true
+			}
 			if r.Goods.IsHybridStock() && item.Stock >= 0 {
 				item.Stock += pool
+			}
+			// 混合模式若池子里还有真货，即使上游缓存过期也仍然卖得出去，
+			// 不算「不可信」—— 精确的那部分货是自有的。
+			if item.StockStale && r.Goods.IsHybridStock() && pool > 0 {
+				item.StockStale = false
 			}
 		}
 		out = append(out, item)
@@ -720,6 +769,26 @@ func (s *ListingService) BuyerQuote(ctx context.Context, listingID uint, quantit
 func (s *ListingService) BuyerQuoteFor(
 	ctx context.Context, listingID uint, quantity int, buyerID uint,
 ) (*models.Listing, decimal.Decimal, error) {
+	return s.buyerQuote(ctx, listingID, quantity, buyerID, 0)
+}
+
+// BuyerQuoteForWithReserved 报价，并把「本笔支付已经预占的张数」算回可售库存。
+//
+// 为什么需要它：卡密池的预占（status=held）本来就不计入 CountAvailable ——
+// 这是对的，别人不该买到它。但**占它的那个人自己**下单时会走到这里，
+// 如果不把这几张加回来，就会出现「我自己占的货把我自己挡在门外」：
+// 池子只剩 1 张、我预占了它、付款后自动下单却报「商品暂时缺货」。
+//
+// 调用方用支付的 request_id 查出自己占了几张，传进 reserved。
+func (s *ListingService) BuyerQuoteForWithReserved(
+	ctx context.Context, listingID uint, quantity int, buyerID uint, reserved int64,
+) (*models.Listing, decimal.Decimal, error) {
+	return s.buyerQuote(ctx, listingID, quantity, buyerID, reserved)
+}
+
+func (s *ListingService) buyerQuote(
+	ctx context.Context, listingID uint, quantity int, buyerID uint, reserved int64,
+) (*models.Listing, decimal.Decimal, error) {
 	var row models.Listing
 	if err := s.db.WithContext(ctx).Preload("Goods").
 		Where("id = ? AND is_listed = ? AND sale_price > 0", listingID, true).
@@ -740,14 +809,84 @@ func (s *ListingService) BuyerQuoteFor(
 		return nil, decimal.Zero, ErrListingQtyInvalid
 	}
 
-	// 自有卡密：下单前先确认库存充足，给买家明确提示而不是等失败
-	if row.Goods != nil && row.Goods.IsLocalStock() && s.cards != nil {
+	// ---- 下单前把过期的上游库存刷成真值 ----
+	//
+	// 只在「真正要花钱」的路径上做（BuyerQuoteFor 被下单与创建支付单共用），
+	// 商品列表/详情不进这里，不会被上游的抖动拖慢。
+	stale := s.supplyStockStale(ctx, &row)
+	if stale && s.stockRefresher != nil && row.Goods != nil && row.Goods.UsesUpstream() {
+		if rerr := s.stockRefresher(ctx, row.GoodsID, SupplyStockTTL); rerr != nil {
+			slog.Warn("下单前刷新上游库存失败，按现有缓存判断",
+				"listing_id", listingID, "goods_id", row.GoodsID, "error", rerr.Error())
+		}
+		stale = false
+	}
+
+	// 下单前先确认「真的发得出货」，别让买家付完钱才发现没货。
+	//
+	// 口径必须和商品页展示的库存一致（见 ListForBuyer）：自有卡密看池子真实张数，
+	// 混合模式看「池子 + 上游缓存」，纯上游看上游缓存。
+	//
+	// 这里原来只判 IsLocalStock()，而它只认 StockModeLocal(2) ——
+	// 混合模式(3) 被整段跳过，等于混合商品**下单前完全不查库存**。
+	// 后果是买家一路付到成功，付款后自动下单才在上游撞「商品已售罄」，
+	// 钱退进余额、卡密拿不到。静默失效，不报错、不告警，只能靠客诉发现。
+	if row.Goods != nil && row.Goods.UsesCardPool() && s.cards != nil {
 		avail, err := s.cards.CountAvailable(ctx, row.GoodsID)
 		if err != nil {
 			return nil, decimal.Zero, err
 		}
-		if int64(quantity) > avail {
-			return nil, decimal.Zero, ErrListingNoStock
+		// reserved 是本笔支付自己占住的张数（还没付款，但已经被它锁定）
+		if int64(quantity) > avail+reserved {
+			// 池子不够：自有卡密模式到此为止；
+			// 混合模式还要看上游有没有货，上游也没货才拒绝，
+			// 否则会把「池子空了但上游充足」的单一起挡掉，白丢生意。
+			if !row.Goods.IsHybridStock() {
+				return nil, decimal.Zero, ErrListingNoStock
+			}
+			ss, serr := s.supplyStockByGoods(ctx, []uint{row.GoodsID})
+			if serr != nil {
+				return nil, decimal.Zero, serr
+			}
+			up := ss[row.GoodsID]
+			// 上游报「不限/未知」时 Stock < 0，不能当成没货
+			if up.SupplyCount == 0 || up.Stock == 0 {
+				return nil, decimal.Zero, ErrListingNoStock
+			}
+		}
+	}
+
+	// ---- 上游侧闸门：上游明确发不出货就别收钱 ----
+	//
+	// 卡密池那条分支只覆盖「吃池子」的商品；纯上游代发（stock_mode=1）
+	// 与混合模式的上游侧原来完全没有库存闸门，买家一路付到付款成功，
+	// 才在上游撞「商品已售罄」，退款了事 —— 这就是客诉里的「没货」。
+	//
+	// 判定依据（刷新后取不到真值时才用缓存，且缓存已在上面的 refresher 里刷过）：
+	//   - 所有启用中的货源都自检失败（上游明确说不能买）
+	//   - 或者新鲜库存明确为 0
+	if row.Goods != nil && row.Goods.UsesUpstream() {
+		ss, serr := s.supplyStockByGoods(ctx, []uint{row.GoodsID})
+		if serr == nil {
+			up := ss[row.GoodsID]
+			dead := up.SupplyCount > 0 && up.Stock >= 0 &&
+				(up.Stock == 0 || up.FailedCount >= up.SupplyCount)
+			if dead {
+				// 混合模式只要自家卡密池够，仍然卖得出去
+				poolEnough := false
+				if row.Goods.IsHybridStock() && s.cards != nil {
+					if avail, cerr := s.cards.CountAvailable(ctx, row.GoodsID); cerr == nil &&
+						int64(quantity) <= avail+reserved {
+						poolEnough = true
+					}
+				}
+				if !poolEnough {
+					slog.Info("上游货源已不可采购，下单前拦截",
+						"listing_id", listingID, "goods_id", row.GoodsID,
+						"stock", up.Stock, "failed", up.FailedCount, "supplies", up.SupplyCount)
+					return nil, decimal.Zero, ErrListingNoStock
+				}
+			}
 		}
 	}
 
@@ -798,6 +937,32 @@ func (s *ListingService) BuyerQuoteFor(
 	row.SalePrice = unitPrice
 
 	return &row, total, nil
+}
+
+// supplyStockStale 该商品的上游库存缓存是否已经不可信。
+//
+// 判定口径与 toShopListings 的 StockStale 完全一致：
+// 有启用中的货源，但最旧的一次同步时间已经超过 SupplyStockTTL
+// （或者从来没同步成功过）。
+func (s *ListingService) supplyStockStale(ctx context.Context, row *models.Listing) bool {
+	if row.Goods == nil || !row.Goods.UsesUpstream() {
+		return false
+	}
+	ss, err := s.supplyStockByGoods(ctx, []uint{row.GoodsID})
+	if err != nil {
+		// 查不出来就当新鲜：不能因为一次查询失败把正常商品判成缺货
+		return false
+	}
+	up := ss[row.GoodsID]
+	if up.SupplyCount == 0 {
+		return false // 没配货源，交给「没有可用货源」那条分支去报
+	}
+	// 上游亲口说「买不了」（售罄/下架/余额不足）→ 缓存里的数字立刻作废，
+	// 不能等 15 分钟超时。线上就是这样把「已售罄」的货源又卖了 1 张。
+	if up.FailedCount > 0 {
+		return true
+	}
+	return up.SyncedAt == nil || time.Since(*up.SyncedAt) > SupplyStockTTL
 }
 
 // buyerTier 取买家当前档位。取不到就按 retail 处理（宁可少给折扣）。

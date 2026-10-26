@@ -131,6 +131,14 @@ export interface ShopListing {
   stock_updated_at?: string | null;
   /** 1=自有卡密 2=上游代发 3=混合 */
   stock_mode: number;
+  /**
+   * 上游库存缓存已过期（超过 15 分钟没有同步成功）。
+   *
+   * 为 true 时 stock 里的数字是**旧值**，上游可能早就没货了 ——
+   * 页面必须显示「库存待确认」，不能继续挂「有货 N」骗买家下单。
+   * 下单时后端会实时询价，真的没货会明确提示缺货，不会收钱后再说。
+   */
+  stock_stale?: boolean;
   /** 阶梯折扣档位（按 min_qty 升序），后端已算好各档单价 */
   tiers?: ShopListingTier[];
 }

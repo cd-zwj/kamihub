@@ -164,6 +164,64 @@ func TestBuyerQuoteRejectsOutOfStock(t *testing.T) {
 	}
 }
 
+// 混合模式（stock_mode=3）的库存检查也必须生效。
+//
+// 回归 2026-10-25 事故：BuyerQuoteFor 里用的是 IsLocalStock()，
+// 它只认 StockModeLocal(2)，混合模式被整段跳过 —— 混合商品下单前
+// 完全不查库存。买家一路付到成功，付款后自动下单才在上游撞「商品已售罄」，
+// 钱退进余额、卡密拿不到，只能靠客诉发现。
+func TestBuyerQuoteRejectsOutOfStockHybrid(t *testing.T) {
+	db := testDB(t)
+	truncateWallet(t, db)
+	if err := db.Exec("TRUNCATE TABLE listings, goods, card_stocks, supplies, platforms RESTART IDENTITY CASCADE").Error; err != nil {
+		t.Fatal(err)
+	}
+	ls := NewListingService(db, NewCardService(db))
+	ctx := context.Background()
+
+	listing, goods := mkListing(t, db, "9.50", models.StockModeHybrid)
+
+	// 1) 池子空 + 一条货源都没有 → 必须拒绝
+	if _, _, err := ls.BuyerQuote(ctx, listing.ID, 1); err == nil {
+		t.Error("混合模式池子空且无货源时应拒绝报价")
+	}
+
+	// 2) 池子空 + 上游缓存有货 → 放行（不能因为池子空了就白丢上游的单）
+	synced := time.Now()
+	mkSupply(t, db, goods.ID, "UP-OK", 5, &synced)
+	if _, _, err := ls.BuyerQuote(ctx, listing.ID, 1); err != nil {
+		t.Errorf("混合模式上游有货时应可报价: %v", err)
+	}
+
+	// 3) 上游缓存也为 0 → 必须拒绝（这正是事故发生时的情况）
+	if err := db.Model(&models.Supply{}).Where("goods_id = ?", goods.ID).
+		Updates(map[string]any{"stock": 0, "stock_synced_at": synced}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ls.BuyerQuote(ctx, listing.ID, 1); err == nil {
+		t.Error("混合模式池子空且上游缓存为 0 时应拒绝报价")
+	}
+
+	// 4) 上游报「未知/不限」（stock < 0）→ 不能当成没货，必须放行
+	if err := db.Model(&models.Supply{}).Where("goods_id = ?", goods.ID).
+		Update("stock", -1).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ls.BuyerQuote(ctx, listing.ID, 1); err != nil {
+		t.Errorf("上游库存未知(-1)时不应拒绝报价: %v", err)
+	}
+
+	// 5) 池子有货时一切照旧，哪怕上游是 0
+	if err := db.Model(&models.Supply{}).Where("goods_id = ?", goods.ID).
+		Update("stock", 0).Error; err != nil {
+		t.Fatal(err)
+	}
+	addCards(t, db, goods.ID, 1)
+	if _, _, err := ls.BuyerQuote(ctx, listing.ID, 1); err != nil {
+		t.Errorf("池子有货时应可报价: %v", err)
+	}
+}
+
 // 起购/限购约束
 func TestBuyerQuoteQuantityLimits(t *testing.T) {
 	db := testDB(t)

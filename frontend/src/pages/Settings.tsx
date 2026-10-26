@@ -1,4 +1,4 @@
-﻿import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   Alert, Button, Card, Divider, Form, Input, InputNumber, Select, Space, Switch, Table, Tabs, Typography, message,
 } from 'antd';
@@ -473,7 +473,13 @@ export default function Settings() {
                 <Form
                   form={securityForm}
                   layout="vertical"
-                  onFinish={(v) => void save('security', v, '安全设置')}
+                  onFinish={(v) =>
+                    // 销售中心已于 2026-10-21 下线：设定项不再暴露在界面上。
+                    // 后端 Update 是整体覆盖保存，缺字段会被解成零值，
+                    // 而 agent_disabled 是「反向开关」（false = 开启专价），
+                    // 因此必须在这里强制写 true，否则一次保存就会把档位专价静默打开。
+                    void save('security', { ...v, agent_disabled: true, agent_self_apply: false }, '安全设置')
+                  }
                 >
                   <Alert
                     type="warning"
@@ -611,37 +617,16 @@ export default function Settings() {
                     </Form.Item>
                   </Space>
 
-                  {/* ---------------- 迭代 3：销售阶梯专价 ---------------- */}
-                  <Divider orientation="left" plain style={{ marginTop: 8 }}>
-                    销售阶梯专价
-                  </Divider>
-                  <Alert
-                    type="info"
-                    showIcon
-                    style={{ marginBottom: 16 }}
-                    message="关闭后所有买家立刻回到零售价"
-                    description="这是出问题时的总开关：关掉后不再重算档位，下单也不再套用任何专价。已有的档位数据保留，重新打开即恢复。"
-                  />
-                  <Space size={24} wrap>
-                    <Form.Item
-                      name="agent_disabled"
-                      label="关闭阶梯专价"
-                      valuePropName="checked"
-                      extra="开启后所有人按零售价下单（应急用）"
-                      style={{ marginBottom: 12 }}
-                    >
-                      <Switch />
-                    </Form.Item>
-                    <Form.Item
-                      name="agent_self_apply"
-                      label="允许自助申请销售资格"
-                      valuePropName="checked"
-                      extra="V1 建议关闭：早期只放信任的人，由后台人工开通"
-                      style={{ marginBottom: 12 }}
-                    >
-                      <Switch />
-                    </Form.Item>
-                  </Space>
+                  {/* ---------------- 销售中心：已于 2026-10-21 下线 ----------------
+                      原来这里有「关闭阶梯专价 / 允许自助申请销售资格」两个开关。
+                      运营确认不需要销售中心，界面一并移除；但字段必须继续留在表单里
+                      参与提交，否则整体覆盖保存会把它写回零值（=重新开启专价）。 */}
+                  <Form.Item name="agent_disabled" hidden valuePropName="checked">
+                    <Switch />
+                  </Form.Item>
+                  <Form.Item name="agent_self_apply" hidden valuePropName="checked">
+                    <Switch />
+                  </Form.Item>
 
                   <Button type="primary" htmlType="submit" icon={<SaveOutlined />} loading={saving}>
                     保存安全设置
